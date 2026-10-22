@@ -8,24 +8,26 @@
 - /api/greeting: 앱을 열 때 먼저 말 걸기
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
 - /api/memories, /api/reminders, /api/data: 기억, 약속, 내 데이터 관리
+- /api/holidays: 달력에 칠할 공휴일
 """
 import html
 import json
 import os
 import time
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, ocr, when
+from app import agent, memory, ocr, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
 from app.store.base import make_store
-from app.tools import CITIES
+from app.tools import CITIES, holidays_of
 
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
 llm = make_llm(settings)
@@ -148,9 +150,12 @@ def put_settings(req: SettingsRequest, user: User = Depends(current_user)):
 @app.get("/api/messages")
 def messages(user: User = Depends(current_user)):
     show = settings.show_turn_panel
+    items = store.recent_messages(user.id, 50)
+    # answered: 사용자 메시지에 답이 저장됐는지. 요청이 끊겨 답이 없는 말은 화면에 표시하고 다음 답의 문맥에서는 뺀다.
     return [{"id": m["id"], "role": m["role"], "content": m["content"],
+             "answered": m["role"] != "user" or memory.is_answered(items, i),
              "meta": m["meta"] if show else {}, "created_at": m["created_at"].isoformat()}
-            for m in store.recent_messages(user.id, 50)]
+            for i, m in enumerate(items)]
 
 
 @app.post("/api/chat")
@@ -196,7 +201,13 @@ def report(req: ReportRequest, user: User = Depends(current_user)):
 
 @app.get("/api/memories")
 def list_memories(user: User = Depends(current_user)):
-    return [{"id": m["id"], "kind": m["kind"], "text": m["text"]} for m in store.list_memories(user.id)]
+    # 일정(event) 메모는 글 속 날짜와 시각을 꺼내 달력에 놓을 수 있게 한다
+    items = []
+    for m in store.list_memories(user.id):
+        day, clock = when.event_day(m["text"], m["created_at"]) if m["kind"] == "event" else (None, None)
+        items.append({"id": m["id"], "kind": m["kind"], "text": m["text"],
+                      "date": day.isoformat() if day else None, "time": clock})
+    return items
 
 
 @app.delete("/api/memories/{memory_id}")
@@ -214,8 +225,24 @@ def clear_memories(user: User = Depends(current_user)):
 @app.get("/api/reminders")
 def list_reminders(user: User = Depends(current_user)):
     tz = when.now_in(store.get_settings(user.id)["timezone"]).tzinfo
-    return [{"id": r["id"], "text": r["text"], "status": r["status"],
-             "due_label": when.label(r["due_at"].astimezone(tz))} for r in store.list_reminders(user.id)]
+    items = []
+    for r in store.list_reminders(user.id):
+        local = r["due_at"].astimezone(tz)
+        items.append({"id": r["id"], "text": r["text"], "status": r["status"], "due_label": when.label(local),
+                      "date": local.date().isoformat(), "time": f"{local:%H:%M}"})
+    return items
+
+
+@app.get("/api/holidays")
+def list_holidays(year: int):
+    """달력에 칠할 한국 공휴일. 공휴일 도구와 같은 공개 API와 캐시를 쓴다."""
+    if not 2000 <= year <= 2100:
+        raise HTTPException(400, "연도가 범위를 벗어났습니다")
+    try:
+        return [{"date": d.isoformat(), "name": n} for d, n in holidays_of(year)]
+    except httpx.HTTPError as error:
+        log("WARNING", "공휴일 불러오기 실패", error=type(error).__name__)
+        return []
 
 
 @app.delete("/api/reminders/{reminder_id}")

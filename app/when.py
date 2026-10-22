@@ -4,7 +4,7 @@
 fake 모드(모델 없음)에서는 아래 규칙으로 흔한 표현만 읽는다.
 """
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 WEEKDAYS = "월화수목금토일"
@@ -79,6 +79,27 @@ def parse_when(text, now):
     if offset is None and due <= now:
         due += timedelta(days=1)
     return due
+
+
+def event_day(text, ref):
+    """기억 메모 '10월 21일(수) 18:00 인왕산 가기'에서 날짜와 시각(HH:MM 또는 None)을 꺼낸다. 날짜가 없으면 (None, None).
+
+    메모에는 연도가 없어서, 기억한 시각(ref)에 가장 가까운 해로 정한다. 12월에 말한 '1월 3일'은 다음 해가 된다.
+    """
+    m = re.search(r"(\d{1,2})월\s*(\d{1,2})일", text)
+    if not m:
+        return None, None
+    candidates = []
+    for year in (ref.year - 1, ref.year, ref.year + 1):
+        try:
+            candidates.append(date(year, int(m.group(1)), int(m.group(2))))
+        except ValueError:
+            pass
+    if not candidates:
+        return None, None
+    day = min(candidates, key=lambda d: abs((d - ref.date()).days))
+    t = re.search(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)", text[m.end():])
+    return day, (f"{int(t.group(1)):02d}:{t.group(2)}" if t else None)
 
 
 def fix_year(value, now):

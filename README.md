@@ -2,7 +2,7 @@
 
 사용자가 정한 캐릭터가 이전 대화와 사용자에 대해 기억한 것을 바탕으로 대화하는 에이전트 서비스입니다.
 
-- 필요하면 도구를 골라 쓴 뒤 답합니다. 날씨, 미세먼지, 공휴일을 찾고 약속을 저장합니다.
+- 필요하면 도구를 골라 쓴 뒤 답합니다. 날씨, 미세먼지, 공휴일, 대중교통 이동 시간을 찾고 약속을 저장합니다.
 - "목요일 아침에 우산 챙기라고 알려 줘"처럼 부탁한 약속은 때가 되면 친구가 먼저 말을 걸어 전합니다.
 - 화면과 API를 FastAPI 하나가 함께 제공하는 단일 서비스입니다. 배포와 운영 실습의 예시 코드로 씁니다.
 
@@ -22,7 +22,7 @@ cd <저장소 이름>
  ① 안전장치   위기 표현이면 캐릭터 설정과 상관없이 정해진 안전 응답 (코드 규칙)
  ② 도구 선택  모델이 도구 0~2개와 인자, 확신도, 이유를 JSON으로 고름
               확신도 0.6 미만이면 도구 없이 되묻기. 모델이 없거나 실패하면 키워드 규칙
- ③ 도구 실행  날씨, 미세먼지, 공휴일(키 없는 공개 API), 약속 저장, 보기, 취소
+ ③ 도구 실행  날씨, 미세먼지, 공휴일(키 없는 공개 API), 이동 시간(카카오맵, 키 필요), 약속 저장, 보기, 취소
  ④ 답 생성    캐릭터 지시문 + 기억 메모 + 대화 요약 + 최근 10턴 + 도구 결과 → 스트리밍
  ⑤ 기억 정리  답을 다 보낸 뒤 같은 요청 안에서 기억 메모와 대화 요약을 갱신
 ```
@@ -38,7 +38,7 @@ cd <저장소 이름>
 | `app/main.py` | 화면(`/`)과 API. 목록은 파일 맨 위 설명 참고 |
 | `app/agent.py` | 한 턴의 처리 흐름(①~⑤)과 앱을 열 때 먼저 말 걸기 |
 | `app/router.py` | 도구 선택기. 모델 선택, 키워드 규칙, 안전장치(확신도 기준, 연도 고치기) |
-| `app/tools.py` | 도구 6개와 지원 도시 목록 |
+| `app/tools.py` | 도구 7개와 지원 도시 목록 |
 | `app/memory.py` | 기억 3층(최근 대화, 대화 요약, 기억 메모) |
 | `app/persona.py` | 캐릭터 설정 선택지와, 설정을 지시문으로 바꾸는 규칙. 고정 안전 규칙 |
 | `app/safety.py` | 위기 표현과 민감 정보 규칙 |
@@ -49,7 +49,7 @@ cd <저장소 이름>
 | `app/config.py` | 설정 읽기. 꼭 필요한 값이 없으면 시작하지 않는다 |
 | `static/index.html` | 화면: 대화, 캐릭터 설정, 기억과 약속, 개발용 "이번 턴" 패널 |
 | `supabase/migrations/` | Supabase 테이블 생성 SQL |
-| `data/eval/` | 평가 데이터: 도구 선택 41개, 기억 정리 15개, 안전 15개 |
+| `data/eval/` | 평가 데이터: 도구 선택 46개, 기억 정리 15개, 안전 15개 |
 | `scripts/eval_tools.py` | 도구 선택 평가 |
 | `scripts/watch_requests.py` | 배포 중 끊김 측정. `/version` 에 0.2초마다 요청하고 리비전별 응답 수와 실패 수를 요약(최대 5분, AI 호출 없음) |
 | `tests/` | 가짜 응답으로 돌리는 테스트 |
@@ -111,7 +111,7 @@ uvicorn app.main:app --port 8080
 pip install -r requirements-dev.txt
 pytest                                  # 가짜 응답으로 실행. 비용 없음
 python scripts/eval_tools.py --rule     # 키워드 규칙 도구 선택 평가. 비용 없음
-python scripts/eval_tools.py            # .env 의 모델로 도구 선택 평가. 호출 41번
+python scripts/eval_tools.py            # .env 의 모델로 도구 선택 평가. 호출 46번
 ```
 
 템플릿을 만들 때 잰 결과입니다(2026-10-12).
@@ -120,6 +120,7 @@ python scripts/eval_tools.py            # .env 의 모델로 도구 선택 평�
 | --- | --- | --- |
 | 모델 `gpt-4o-mini` (3회 실행) | 37~39 / 41 | 35~36 / 41 |
 | 키워드 규칙 | 37 / 41 | 36 / 41 |
+| 키워드 규칙, 약속·이동 시간 문항 5개 추가 뒤(2026-10-21) | 42 / 46 | 41 / 46 |
 
 **모델이 자주 틀린 것**
 - "아침"을 08:00이 아니라 09:00으로 잡음
@@ -153,6 +154,7 @@ gcloud run deploy friend-agent --source . --region us-central1 --allow-unauthent
 | --- | --- | --- |
 | 재배포해도 남는 저장, 사용자별 데이터 | `STORAGE=supabase`, `AUTH=supabase` | Supabase 프로젝트, 익명 로그인 켜기. 절차는 `docs/supabase.md`. 동료에게 공개하기 전에 구글 로그인과 함께 붙인다 |
 | 구글 계정 연결 | `GOOGLE_LOGIN=true` | Supabase 구글 로그인 설정, 수동 연결(manual linking) 켜기 |
+| 이동 시간(대중교통) | `KAKAO_REST_KEY` (Secret Manager 로 연결) | 카카오 디벨로퍼스 앱, [카카오맵] 사용 설정. 키가 없으면 이 도구만 꺼진다 |
 | 사진 글자 읽기 | `OCR_ENABLED=true` | tesseract 프로그램. 노트북: `brew install tesseract tesseract-lang`(macOS). 서버: Dockerfile에 설치(`starter/Dockerfile`) |
 | 앱을 닫아 둬도 오는 약속 알림 | 아직 없음 | Cloud Scheduler, 웹 푸시, PWA |
 
@@ -162,5 +164,6 @@ gcloud run deploy friend-agent --source . --region us-central1 --allow-unauthent
 | --- | --- | --- |
 | 날씨, 미세먼지 | [Open-Meteo](https://open-meteo.com/) | 키 없음. 비상업적 사용 무료, 하루 1만 건 이하 권장. 상용 서비스는 유료 플랜 필요 |
 | 공휴일 | [Nager.Date](https://date.nager.at/) | 키 없음 |
+| 이동 시간 | [카카오맵 REST API](https://developers.kakao.com/docs/ko/kakaomap/rest-api) 키워드 장소 검색 + 대중교통 경로 | REST API 키. 하루 무료 장소 검색 10만 건, 대중교통 1천 건(계정에서 처음 켠 앱에만). 출발 시각은 넣을 수 없어 걸리는 시간만 받는다. 결과는 저장하지 않고 매번 부른다 |
 
 공개 지오코딩 API는 한국어 지명을 잘못 찾는 경우가 있어서, 지원 도시 26곳의 좌표를 `app/tools.py` 에 직접 적어 두었습니다.

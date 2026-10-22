@@ -2,7 +2,7 @@
 
 ① 안전장치: 위기 표현이면 정해진 안전 응답으로 끝낸다(코드 규칙).
 ② 도구 선택: 모델이 도구를 0~2개 고른다. 확신이 낮으면 되묻는다(router.py).
-③ 도구 실행: 날씨, 미세먼지, 공휴일, 약속(tools.py).
+③ 도구 실행: 날씨, 미세먼지, 공휴일, 이동 시간, 약속(tools.py).
 ④ 답 생성: 캐릭터 지시문 + 기억 + 도구 결과 + 최근 대화로 답을 스트리밍한다.
 ⑤ 기억 정리: 답을 다 보낸 뒤 같은 요청 안에서 기억 메모와 대화 요약을 갱신한다(memory.py).
    Cloud Run 기본 설정(요청 기반 과금)에서는 응답이 끝난 뒤 CPU가 거의 주어지지 않아서,
@@ -10,6 +10,7 @@
 
 결과는 이벤트(dict)로 하나씩 내보낸다. show_panel 이 꺼져 있으면(production) 개발용 이벤트는 아예 만들지 않는다.
 """
+import time
 from datetime import timedelta
 
 from app import memory, when
@@ -20,14 +21,25 @@ from app.safety import CRISIS_REPLY, is_crisis
 from app.tools import TOOLS, Context, run_tool
 
 GREETING_GAP = timedelta(hours=6)  # 마지막 대화 뒤 이만큼 지나면 앱을 열 때 먼저 말을 건다
+UPCOMING_DAYS = 7                  # 답에 넣는 '다가오는 약속'의 범위
+BOOTED_AT = time.time()            # 이 인스턴스가 시작한 시각. 화면이 콜드 스타트를 알아채는 데 쓴다
 
 
-def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False):
+def upcoming_reminders(store, uid, now):
+    """앞으로 7일 안의 예정된 약속(최대 5개). 약속 도구를 고르지 않은 턴에도 답이 약속을 알고 있게 한다."""
+    start, end = now - timedelta(hours=12), now + timedelta(days=UPCOMING_DAYS)
+    items = [r for r in store.list_reminders(uid, status="pending") if start <= r["due_at"] <= end]
+    return [f"{when.label(r['due_at'].astimezone(now.tzinfo))} '{r['text']}'" for r in items[:5]]
+
+
+def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False, upcoming=()):
     parts = [build_persona(character),
              f"[지금] {when.label(now)} ({now.tzinfo}), 사용자 지역: {location}\n[달력]\n{when.calendar_hint(now)}"]
     block = memory.memory_block(memories, summary)
     if block:
         parts.append(block)
+    if upcoming:
+        parts.append("[다가오는 약속: 사용자가 알려 달라고 저장해 둔 것]\n" + "\n".join(f"- {line}" for line in upcoming))
     if tool_lines:
         parts.append("[도구 결과]\n" + "\n".join(f"- {line}" for line in tool_lines))
     if clarify:
@@ -41,6 +53,10 @@ def run_turn(message, uid, llm, store, show_panel):
     now = when.now_in(settings["timezone"])
     memories, summary, recent = memory.build_context(store, uid)
     history = [{"role": m["role"], "content": m["content"]} for m in recent]
+    # 화면에 바로 보내는 첫 신호. 이게 늦게 오면 서버가 켜지는 중(콜드 스타트)이었다는 뜻이다.
+    # remembers 가 False 면 이 서버는 이 사용자와의 앞 대화를 모른다(새 인스턴스, 메모리 저장소).
+    yield {"type": "start", "remembers": bool(recent or summary or memories),
+           "instance_age": round(time.time() - BOOTED_AT)}
     store.add_message(uid, "user", message)
 
     # ① 위기 표현
@@ -72,12 +88,15 @@ def run_turn(message, uid, llm, store, show_panel):
                    "summary": r.summary, "data": r.data}
         if r.ok and r.name in ("create_reminder", "cancel_reminder"):
             yield {"type": "reminder", "action": r.name, "summary": r.summary}
+        if r.ok and r.data.get("card"):  # 이동 시간 카드는 사용자 화면에도 보여 준다(저장하지 않음)
+            yield r.data["card"] | {"type": "card", "kind": r.data["card"]["type"]}
 
     # ④ 답 생성
+    upcoming = upcoming_reminders(store, uid, now)
     system = system_prompt(character, now, settings["location"], memories, summary,
-                           [r.summary for r in results], clarify=choice.action == "clarify")
+                           [r.summary for r in results], clarify=choice.action == "clarify", upcoming=upcoming)
     if show_panel:
-        yield {"type": "context", "memories": [m["text"] for m in memories],
+        yield {"type": "context", "memories": [m["text"] for m in memories], "upcoming": upcoming,
                "summary": summary["text"] if summary else None, "recent_messages": len(history)}
     reply = ""
     for chunk in llm.chat_stream([{"role": "system", "content": system}, *history, {"role": "user", "content": message}]):

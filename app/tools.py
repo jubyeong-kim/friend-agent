@@ -1,11 +1,13 @@
 """캐릭터가 쓸 수 있는 도구.
 
 외부 도구(날씨, 미세먼지, 공휴일)는 모두 키 없이 부를 수 있는 공개 API를 쓴다.
+이동 시간 도구만 카카오맵 REST API 키(KAKAO_REST_KEY)가 필요하다. 키가 없으면 그 도구만 꺼진다.
 약속 도구는 외부를 부르지 않고 저장소에만 쓴다.
 각 도구는 모델이 읽을 한 문장 요약(summary)과 화면에 보여 줄 원본(data)을 함께 돌려준다.
 """
+import os
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import httpx
 
@@ -166,11 +168,114 @@ def get_holidays(args, ctx):
     return ToolResult("get_holidays", True, f"{start}~{end} 공휴일: {listed}{more}.", data)
 
 
+# ── 이동 시간 도구(카카오맵 REST API) ──────────────────────────────
+# 장소 이름을 키워드 검색으로 좌표로 바꾼 뒤 대중교통 경로를 묻는다. 출발 시각은 API에 넣을 수 없어서,
+# 걸리는 시간만 받아 출발 시각(말하지 않았으면 지금)에 더해 도착 시각을 계산한다.
+# 카카오 안내(데브톡 API FAQ)는 실시간 호출만 허용하고 결과를 따로 저장해 쓰는 것을 막는다. 그래서 캐시 없이 물을 때마다 부른다.
+
+KAKAO = "https://dapi.kakao.com"
+# 응답에 노선 색이 없어서 수도권 지하철 노선 색과 버스 종류 색을 직접 적어 둔다
+LINE_COLORS = {
+    "1호선": "#0052a4", "2호선": "#00a84d", "3호선": "#ef7c1c", "4호선": "#00a5de", "5호선": "#996cac",
+    "6호선": "#cd7c2f", "7호선": "#747f00", "8호선": "#e6186c", "9호선": "#bdb092", "신분당": "#d4003b",
+    "경의중앙": "#77c4a3", "공항": "#0090d2", "수인분당": "#fabe00", "신림": "#6789ca", "우이신설": "#b0ce18",
+}
+BUS_COLORS = {"간선": "#0068b7", "지선": "#53b332", "광역": "#e60012", "순환": "#f2b70a", "마을": "#53b332", "직행": "#e60012"}
+
+
+def kakao_key():
+    return os.environ.get("KAKAO_REST_KEY", "").strip()
+
+
+def kakao(path, params):
+    r = httpx.get(KAKAO + path, params=params, timeout=TIMEOUT, headers={"Authorization": f"KakaoAK {kakao_key()}"})
+    r.raise_for_status()
+    return r.json()
+
+
+def find_place(name):
+    """장소 이름 → 키워드 검색의 첫 결과(place_name, x=경도, y=위도). 못 찾으면 None."""
+    docs = kakao("/v2/local/search/keyword.json", {"query": name, "size": 1}).get("documents") or []
+    return docs[0] if docs else None
+
+
+def leg_of(step):
+    """경로의 한 구간 → 화면 카드에 그릴 {mode, name, minutes, color}."""
+    p = step.get("properties") or {}
+    minutes = max(1, round((p.get("time") or 0) / 60))
+    if p.get("type") == "WALKING":
+        return {"mode": "walk", "name": "도보", "minutes": minutes}
+    vehicle = (p.get("vehicles") or [{}])[0]
+    name, kind = str(vehicle.get("name") or ""), str(vehicle.get("type") or "")
+    if p.get("type") == "SUBWAY":
+        color = next((c for line, c in LINE_COLORS.items() if line in name), "#5d6478")
+        return {"mode": "subway", "name": name or "지하철", "minutes": minutes, "color": color}
+    return {"mode": "bus", "name": f"{kind} {name}".strip() or "버스", "minutes": minutes, "color": BUS_COLORS.get(kind, "#3d7bd9")}
+
+
+def read_clock(value, now):
+    """모델이 준 ISO 시각이나 'HH:MM'을 사용자 시간대 시각으로 바꾼다. 없거나 못 읽으면 None."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if len(text) <= 5 and ":" in text:
+            hour, minute = (int(x) for x in text.split(":"))
+            return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        t = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return t.replace(tzinfo=now.tzinfo) if t.tzinfo is None else t.astimezone(now.tzinfo)
+
+
+def get_route(args, ctx):
+    if not kakao_key():
+        return ToolResult("get_route", False, "이동 시간 도구가 아직 연결되지 않았습니다(지도 API 키 없음). 걸리는 시간은 짐작하지 말고 모른다고 해야 합니다.")
+    origin, dest = (" ".join(str(args.get(k) or "").split())[:40] for k in ("origin", "destination"))
+    if not origin or not dest:
+        missing = "출발지" if not origin else "도착지"
+        return ToolResult("get_route", False, f"{missing}를 몰라 이동 시간을 보지 못했습니다. 어디서 어디로 가는지 물어봐야 합니다.")
+    places = {}
+    for name in (origin, dest):
+        places[name] = find_place(name)
+        if not places[name]:
+            return ToolResult("get_route", False, f"'{name}' 장소를 지도에서 찾지 못했습니다. 정확한 역이나 장소 이름을 물어봐야 합니다.")
+    a, b = places[origin], places[dest]
+    data = kakao("/v2/routing/publictraffic", {"start_x": a["x"], "start_y": a["y"], "end_x": b["x"], "end_y": b["y"],
+                                               "s_name": a["place_name"], "e_name": b["place_name"]})
+    routes = data.get("routes") or []
+    if data.get("status") != "OK" or not routes:
+        why = {"EQUAL_POINTS": "출발지와 도착지가 같습니다", "NO_RESULTS": "대중교통 경로가 없습니다(걸어갈 만큼 가까울 수 있음)"}
+        return ToolResult("get_route", False, f"{a['place_name']} → {b['place_name']}: {why.get(data.get('status'), '대중교통 경로를 찾지 못했습니다')}.")
+
+    best = min(routes, key=lambda r: (r.get("properties") or {}).get("totalTime") or 10 ** 9)
+    prop = best["properties"]
+    minutes = round(prop["totalTime"] / 60)
+    transfers = prop.get("transfers") or 0
+    legs = [leg_of(s) for s in best.get("steps") or []]
+    rides = " → ".join(leg["name"] for leg in legs if leg["mode"] != "walk")
+    now = when.now_in(ctx.timezone)
+    depart = read_clock(args.get("depart_at"), now) or now
+    arrive = depart + timedelta(minutes=minutes)
+    summary = (f"{a['place_name']} → {b['place_name']} 대중교통 약 {minutes}분(환승 {transfers}번{', ' + rides if rides else ''}). "
+               f"{depart:%H:%M}에 출발하면 {arrive:%H:%M}쯤 도착.")
+    deadline = read_clock(args.get("arrive_by"), now)
+    if deadline:
+        spare = round((deadline - arrive).total_seconds() / 60)
+        summary += f" {deadline:%H:%M}까지는 " + (f"약 {spare}분 여유." if spare >= 0 else f"약 {-spare}분 늦음.")
+    summary += " 카카오맵 예상 시간이라 배차 간격이나 막차는 반영되지 않았을 수 있음."
+    fare = (prop.get("fare") or {}).get("value")
+    card = {"type": "route", "from": a["place_name"], "to": b["place_name"], "minutes": minutes,
+            "summary": f"환승 {transfers}번" + (f" · {fare:,}원" if fare else ""), "legs": legs,
+            "source": f"카카오맵 · {depart:%H:%M} 출발 기준 예상"}
+    return ToolResult("get_route", True, summary, {"card": card, "depart": depart.isoformat(), "arrive": arrive.isoformat()})
+
+
 # ── 약속 도구 ──────────────────────────────────────────────────────
 
 def create_reminder(args, ctx):
     now = when.now_in(ctx.timezone)
-    text = str(args.get("text") or "").strip()[:100]
+    text = " ".join(str(args.get("text") or "").split())[:100]
     if not text:
         return ToolResult("create_reminder", False, "무엇을 알려 줄지 몰라 약속을 저장하지 않았습니다.")
     due, error = when.check_due(args.get("due_at"), now)
@@ -178,8 +283,10 @@ def create_reminder(args, ctx):
         return ToolResult("create_reminder", False, f"약속을 저장하지 않았습니다: {error}")
     reminder = ctx.store.add_reminder(ctx.user_id, text, due)
     local = due.astimezone(now.tzinfo)
-    return ToolResult("create_reminder", True, f"약속을 저장했습니다: {when.label(local)}에 '{text}'.",
-                      {"id": reminder["id"], "text": text, "due_at": local.isoformat()})
+    data = {"id": reminder["id"], "text": text, "due_at": local.isoformat(), "duplicate": bool(reminder.get("duplicate"))}
+    if data["duplicate"]:
+        return ToolResult("create_reminder", True, f"같은 약속이 이미 있어서 새로 저장하지 않았습니다: {when.label(local)}에 '{text}'.", data)
+    return ToolResult("create_reminder", True, f"약속을 저장했습니다: {when.label(local)}에 '{text}'.", data)
 
 
 def list_reminders(args, ctx):
@@ -220,6 +327,11 @@ TOOLS = {
         "desc": "기간 안의 한국 공휴일. 연휴, 빨간 날 질문",
         "args": '{"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"}',
     },
+    "get_route": {
+        "run": get_route, "label": "이동 시간",
+        "desc": "두 장소 사이를 대중교통(지하철, 버스)으로 가는 시간과 경로. '몇 분 걸려', '몇 시까지 갈 수 있어' 질문",
+        "args": '{"origin": "출발 장소 이름", "destination": "도착 장소 이름", "depart_at": "출발 ISO 시각(말했을 때만)", "arrive_by": "도착해야 하는 ISO 시각(말했을 때만)"}',
+    },
     "create_reminder": {
         "run": create_reminder, "label": "약속 저장",
         "desc": "사용자가 나중에 알려 달라고 한 일을 시각과 함께 저장",
@@ -244,3 +356,6 @@ def run_tool(name, args, ctx):
     except httpx.HTTPError as error:
         log("WARNING", "외부 도구 호출 실패", tool=name, error=type(error).__name__)
         return ToolResult(name, False, f"{TOOLS[name]['label']} 정보를 지금은 불러오지 못했습니다.")
+    except (KeyError, TypeError, ValueError) as error:  # 외부 API 응답 형식이 예상과 다를 때 대화 전체가 멈추지 않게
+        log("WARNING", "외부 도구 응답 형식 오류", tool=name, error=type(error).__name__)
+        return ToolResult(name, False, f"{TOOLS[name]['label']} 정보를 읽지 못했습니다.")

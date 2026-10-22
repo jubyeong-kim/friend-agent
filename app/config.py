@@ -113,5 +113,6 @@ def load_settings():
         ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. tesseract 프로그램이 필요하다
     )
     log("INFO", "앱을 시작합니다.", provider=settings.provider, model=settings.model, env=settings.env,
-        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel)
+        storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel,
+        route_tool=bool(os.environ.get("KAKAO_REST_KEY", "").strip()))  # 키 값이 아니라 있는지만 남긴다
     return settings

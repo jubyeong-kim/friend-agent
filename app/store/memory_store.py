@@ -83,7 +83,12 @@ class MemoryStore:
 
     # 약속
     def add_reminder(self, uid, text, due_at):
+        """같은 내용, 같은 시각(분 단위)의 예정된 약속이 이미 있으면 새로 만들지 않고 그 약속을 돌려준다(duplicate=True)."""
+        minute = due_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
         with self.lock:
+            for old in self._user(uid)["reminders"]:
+                if old["status"] == "pending" and old["text"] == text and old["due_at"].replace(second=0, microsecond=0) == minute:
+                    return {**old, "duplicate": True}
             r = {"id": next(self.ids), "text": text, "due_at": due_at.astimezone(timezone.utc),
                  "status": "pending", "delivered_at": None, "created_at": utcnow()}
             self._user(uid)["reminders"].append(r)

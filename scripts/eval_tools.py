@@ -1,7 +1,7 @@
 """도구 선택 평가. data/eval/tool_selection.jsonl 의 메시지마다 고른 도구와 핵심 인자가 정답과 맞는지 센다.
 
 실행:
-  python scripts/eval_tools.py            # .env 의 LLM 으로 모델 선택기를 평가 (호출 40번, 비용 발생)
+  python scripts/eval_tools.py            # .env 의 LLM 으로 모델 선택기를 평가 (호출 46번, 비용 발생)
   python scripts/eval_tools.py --rule     # 키워드 규칙 선택기를 평가 (비용 없음)
 
 정답의 날짜와 시각은 '2026-10-12(월) 14:00 한국 시간'을 지금으로 보고 만들었다. 평가도 그 시각을 지금으로 쓴다.
@@ -27,7 +27,7 @@ def args_match(expected, actual):
     wrong = []
     for key, want in expected.items():
         got = actual.get(key)
-        if key == "due_at":
+        if key in ("due_at", "depart_at", "arrive_by"):
             try:
                 same = datetime.fromisoformat(str(got)).replace(tzinfo=None, second=0) == datetime.fromisoformat(want)
             except ValueError:

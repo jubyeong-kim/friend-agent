@@ -23,7 +23,17 @@ KEYWORDS = {
 # "토요일 날씨 알려 줘"는 약속이 아니다. 약속은 "~라고 알려 줘", "잊지 않게", "리마인드"처럼 부탁하는 말이 있어야 한다.
 ASK_PATTERN = re.compile(r"(라고|으라고|하라고)\s*(꼭\s*)?(알려|말해)|잊지 않게|리마인드|깨워")
 CANCEL_WORDS = ["취소", "지워", "없던 걸로", "안 알려 줘도", "안 알려줘도"]
-LIST_PATTERN = re.compile(r"(약속|알림|리마인드).*(뭐|목록|있어|있지|있었|보여|확인)")
+LIST_PATTERN = re.compile(r"(약속|알림|리마인드|스케줄).*(뭐|목록|있어|있나|있지|있었|보여|확인|알아|아는)")
+# 이동 시간: "얼마나 걸려", "몇 분", "갈 수 있어" 같은 말과 도착지가 함께 있어야 한다("감기 걸려"는 아니다)
+ROUTE_ASK = re.compile(r"얼마나\s*걸|몇\s*분|몇\s*시간|걸려\?|걸리|갈\s*수\s*있|도착할\s*수|어떻게\s*가")
+PLACE = r"(?<!\w)([가-힣A-Za-z][가-힣A-Za-z0-9]*)"   # 앞이 글자·숫자가 아닌 곳에서 시작("7시까지"의 '시'는 장소가 아니다)
+NOT_PLACE = {"지하철", "버스", "택시", "걸어서", "도보", "차", "자전거", "몇", "언제", "어디"}
+ROUTE_FROM = re.compile(PLACE + r"(?:에서|부터)(?=\s)")
+ROUTE_TO = [re.compile(PLACE + r"\s*(?:→|->)\s*" + PLACE),                       # 낙성대→인왕산
+            re.compile(PLACE + r"(?:까지|으로|로)(?=\s|$|\?)"),                      # 경복궁역까지
+            re.compile(PLACE + r"\s+(?:가면|가려면|가는\s*데|갈\s*수|가는\s*거)")]     # 인왕산 가면
+DEPART = re.compile(r"\d{1,2}\s*시(?:\s*\d{1,2}\s*분|\s*반)?\s*(?:에\s*)?(?:퇴근|출발|나가|끝나)")
+ARRIVE = re.compile(r"\d{1,2}\s*시(?:\s*\d{1,2}\s*분|\s*반)?\s*까지")
 
 
 def router_prompt():
@@ -42,8 +52,13 @@ def router_prompt():
         "- create_reminder 는 사용자가 나중에 알려 달라고 분명히 부탁할 때만 고른다. 일정이 있다는 이야기만 하면 고르지 않는다.",
         "- create_reminder 의 text 는 알려 줄 내용만 짧게 쓴다. 예: '우산 챙기기', '일찍 자기'.",
         "- create_reminder 의 due_at 은 [지금] 시각과 시간대를 기준으로 계산한다. 시각 없이 날짜만 있으면 09:00, 아침 08:00, 점심 12:00, 저녁 19:00, 밤 21:00 으로 한다.",
+        "- 사용자가 자기 약속, 알림, 일정을 묻거나 확인하려 하면 list_reminders 를 고른다. 예: '내일 약속 있어?', '내 약속에 대해 아는 거 있어?'.",
+        "- 어디서 어디까지 얼마나 걸리는지, 몇 시까지 갈 수 있는지 물으면 get_route 를 고른다. 걸리는 시간을 짐작해서 답하지 않게 하기 위해서다.",
+        "- get_route 의 origin, destination 은 말한 역이나 장소 이름을 그대로 쓴다. 예: '낙성대역', '인왕산'. 출발지를 말하지 않았으면 최근 대화에서 찾고, 없으면 빈 문자열로 둔다.",
+        "- get_route 의 depart_at 은 '6시에 퇴근하고'처럼 출발 시각을 말했을 때만, arrive_by 는 '7시까지'처럼 도착해야 할 시각을 말했을 때만 [지금] 기준 ISO 시각으로 쓴다.",
+        "- 다녀온 이야기('어제 인왕산 가는 데 2시간 걸렸어')처럼 지난 경험이면 get_route 를 고르지 않는다.",
         "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
-        "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다.",
+        "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다. 도구가 필요 없다고 판단했을 때도 그 판단의 확신을 쓴다(일상 대화면 높게).",
         "- reason 은 고른 이유를 한국어 한 문장으로 쓴다.",
         '- 반드시 JSON 하나로만 답한다: {"tools": [{"name": "도구 이름", "args": {인자}}], "confidence": 0과 1 사이 숫자, "reason": "이유"}',
     ])
@@ -87,6 +102,26 @@ def holiday_range(message, now):
     return {"from": f"{year}-{month:02d}-01", "to": f"{year}-{month:02d}-{last}"}
 
 
+def route_args(message, now):
+    """'6시 퇴근하고 낙성대에서 인왕산 가면 몇 시간 걸려?' → 출발지, 도착지, 출발/도착 시각. 이동 시간 질문이 아니면 None."""
+    if not ROUTE_ASK.search(message):
+        return None
+    args = {"origin": "", "destination": ""}
+    found = (m for pattern in ROUTE_TO for m in pattern.finditer(message) if m.group(m.lastindex) not in NOT_PLACE)
+    if m := next(found, None):
+        args["destination"] = m.group(m.lastindex)
+        if m.lastindex == 2:
+            args["origin"] = m.group(1)
+    if not args["destination"]:
+        return None
+    if not args["origin"] and (m := ROUTE_FROM.search(message)):
+        args["origin"] = m.group(1)
+    for key, pattern in (("depart_at", DEPART), ("arrive_by", ARRIVE)):
+        if (m := pattern.search(message)) and (t := when.parse_when(m.group(0), now)):
+            args[key] = t.isoformat()
+    return args
+
+
 def rule_choose(message, now, location):
     picked = []
     if any(w in message for w in CANCEL_WORDS) and re.search(r"약속|알림|리마인드", message):
@@ -95,6 +130,8 @@ def rule_choose(message, now, location):
         picked.append({"name": "list_reminders", "args": {}})
     elif ASK_PATTERN.search(message) and (due := when.parse_when(message, now)):
         picked.append({"name": "create_reminder", "args": {"text": reminder_text(message), "due_at": due.isoformat()}})
+    elif route := route_args(message, now):
+        picked.append({"name": "get_route", "args": route})
     else:
         day = (now + timedelta(days=when.day_offset(message, now) or 0)).date().isoformat()
         for name, words in KEYWORDS.items():
@@ -126,7 +163,7 @@ def model_choose(message, history, now, location, llm):
 
     # 안전장치: 지난 연도로 적힌 날짜는 올해로 고친다
     for t in result.tools:
-        for key in ("date", "due_at", "from", "to"):
+        for key in ("date", "due_at", "from", "to", "depart_at", "arrive_by"):
             if key in t["args"]:
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
@@ -144,6 +181,13 @@ def choose(message, history, now, location, llm):
             result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
     else:
         result = rule_choose(message, now, location)
+
+    # 안전장치: 약속을 묻는 말인데 모델이 아무 도구도 못 골라 되묻게 될 때는, 되묻는 대신 약속 목록을 본다.
+    # 되물으면 저장된 약속이 있어도 "모른다"고 답하게 된다(실습에서 확신도 0.00 으로 확인).
+    if not result.tools and result.confidence < CONFIDENCE_THRESHOLD and LIST_PATTERN.search(message):
+        result.tools = [{"name": "list_reminders", "args": {}}]
+        result.confidence = CONFIDENCE_THRESHOLD
+        result.guards.append("약속을 묻는 말이라 되묻지 않고 약속 목록을 봅니다.")
 
     # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
     if result.confidence < CONFIDENCE_THRESHOLD:

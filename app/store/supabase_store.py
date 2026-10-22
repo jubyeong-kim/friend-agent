@@ -116,6 +116,11 @@ class SupabaseStore:
                 "delivered_at": parse_time(row.get("delivered_at")), "created_at": parse_time(row["created_at"])}
 
     def add_reminder(self, uid, text, due_at):
+        """같은 내용, 같은 시각의 예정된 약속이 있으면 새로 만들지 않고 그 약속을 돌려준다(duplicate=True).
+        확인과 저장 사이에 똑같은 요청이 동시에 오면 둘 다 저장될 수 있다. 막으려면 DB에 유일 색인이 필요하다."""
+        same = self._get("reminders", user_id=f"eq.{uid}", status="eq.pending", text=f"eq.{text}", due_at=f"eq.{iso(due_at)}")
+        if same:
+            return {**self._reminder(same[0]), "duplicate": True}
         return self._reminder(self._insert("reminders", {"user_id": uid, "text": text, "due_at": iso(due_at)}))
 
     def list_reminders(self, uid, status=None):
