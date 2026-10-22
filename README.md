@@ -167,3 +167,5 @@ gcloud run deploy friend-agent --source . --region us-central1 --allow-unauthent
 | 이동 시간 | [카카오맵 REST API](https://developers.kakao.com/docs/ko/kakaomap/rest-api) 키워드 장소 검색 + 대중교통 경로 | REST API 키. 하루 무료 장소 검색 10만 건, 대중교통 1천 건(계정에서 처음 켠 앱에만). 출발 시각은 넣을 수 없어 걸리는 시간만 받는다. 결과는 저장하지 않고 매번 부른다 |
 
 공개 지오코딩 API는 한국어 지명을 잘못 찾는 경우가 있어서, 지원 도시 26곳의 좌표를 `app/tools.py` 에 직접 적어 두었습니다.
+
+이 저장소는 jubyeong-kim 이 Cloud Run 배포 실습용으로 만들었다.
