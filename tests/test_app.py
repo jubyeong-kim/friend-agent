@@ -114,6 +114,22 @@ def test_route_question_picks_route_tool():
     assert router.rule_choose("어제 인왕산 가는 데 2시간이나 걸렸어", now, "서울").tools == []
 
 
+def test_model_route_calls_are_merged_and_clock_fixed():
+    class Split:  # 배포 뒤 실제로 본 모델 응답: 출발용·도착용으로 나눠 두 번, 출발 시각엔 지금 시각
+        can_reason = True
+
+        def complete_json(self, system, user):
+            return {"tools": [
+                {"name": "get_route", "args": {"origin": "낙성대역", "destination": "경복궁역", "depart_at": "2026-10-21T15:45:00+09:00"}},
+                {"name": "get_route", "args": {"origin": "낙성대역", "destination": "경복궁역", "arrive_by": "2026-10-21T19:00:00+09:00"}}],
+                "confidence": 0.9, "reason": "두 번 요청"}
+
+    now = datetime(2026, 10, 21, 15, 45, tzinfo=timezone(timedelta(hours=9)))
+    choice = router.choose("6시에 퇴근하고 낙성대역에서 경복궁역 가면 7시까지 도착할 수 있어?", [], now, "서울", Split())
+    assert choice.tools == [{"name": "get_route", "args": {"origin": "낙성대역", "destination": "경복궁역",
+                                                           "depart_at": "2026-10-21T18:00:00+09:00", "arrive_by": "2026-10-21T19:00:00+09:00"}}]
+
+
 def test_route_tool_without_key_does_not_guess(monkeypatch):
     monkeypatch.delenv("KAKAO_REST_KEY", raising=False)
     result = tools.get_route({"origin": "낙성대역", "destination": "인왕산"}, tools.Context(store, "local-user", "서울", "Asia/Seoul"))

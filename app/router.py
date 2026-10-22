@@ -6,7 +6,7 @@ fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했�
 """
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app import when
 from app.logs import log
@@ -55,7 +55,8 @@ def router_prompt():
         "- 사용자가 자기 약속, 알림, 일정을 묻거나 확인하려 하면 list_reminders 를 고른다. 예: '내일 약속 있어?', '내 약속에 대해 아는 거 있어?'.",
         "- 어디서 어디까지 얼마나 걸리는지, 몇 시까지 갈 수 있는지 물으면 get_route 를 고른다. 걸리는 시간을 짐작해서 답하지 않게 하기 위해서다.",
         "- get_route 의 origin, destination 은 말한 역이나 장소 이름을 그대로 쓴다. 예: '낙성대역', '인왕산'. 출발지를 말하지 않았으면 최근 대화에서 찾고, 없으면 빈 문자열로 둔다.",
-        "- get_route 의 depart_at 은 '6시에 퇴근하고'처럼 출발 시각을 말했을 때만, arrive_by 는 '7시까지'처럼 도착해야 할 시각을 말했을 때만 [지금] 기준 ISO 시각으로 쓴다.",
+        "- get_route 는 한 번만 고른다. 출발 시각과 도착 시각을 둘 다 말했으면 한 호출의 depart_at, arrive_by 에 함께 넣는다.",
+        "- get_route 의 depart_at 은 '6시에 퇴근하고'처럼 출발 시각을 말했을 때만 그 시각으로 쓴다('6시'는 보통 18:00). 말하지 않았으면 비워 둔다(지금 출발로 계산된다). arrive_by 는 '7시까지'처럼 도착해야 할 시각을 말했을 때만 쓴다. 둘 다 [지금] 기준 ISO 시각이다.",
         "- 다녀온 이야기('어제 인왕산 가는 데 2시간 걸렸어')처럼 지난 경험이면 get_route 를 고르지 않는다.",
         "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
         "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다. 도구가 필요 없다고 판단했을 때도 그 판단의 확신을 쓴다(일상 대화면 높게).",
@@ -116,10 +117,16 @@ def route_args(message, now):
         return None
     if not args["origin"] and (m := ROUTE_FROM.search(message)):
         args["origin"] = m.group(1)
+    return args | route_clocks(message, now)
+
+
+def route_clocks(message, now):
+    """'6시에 퇴근하고 … 7시까지' → {"depart_at": 18:00, "arrive_by": 19:00} (ISO). 말하지 않은 것은 뺀다."""
+    found = {}
     for key, pattern in (("depart_at", DEPART), ("arrive_by", ARRIVE)):
         if (m := pattern.search(message)) and (t := when.parse_when(m.group(0), now)):
-            args[key] = t.isoformat()
-    return args
+            found[key] = t.isoformat()
+    return found
 
 
 def rule_choose(message, now, location):
@@ -168,7 +175,37 @@ def model_choose(message, history, now, location, llm):
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
                     result.guards.append(f"{t['name']} 의 {key} 연도가 지난 연도라 {now.year}년으로 고쳤습니다.")
+
+    # 안전장치: 같은 도구를 같은 인자로 두 번 고르면 하나만 남긴다. 이동 시간은 인자가 달라도 하나로 합친다
+    # (실습에서 출발 시각용, 도착 시각용으로 나눠 두 번 골라 카드가 두 장 나왔다)
+    merged = []
+    for t in result.tools:
+        same = next((m for m in merged if m["name"] == t["name"] and (t["name"] == "get_route" or m["args"] == t["args"])), None)
+        if same is None:
+            merged.append(t)
+            continue
+        for key, value in t["args"].items():
+            if value and not same["args"].get(key):
+                same["args"][key] = value
+        result.guards.append(f"{t['name']} 를 두 번 골라 하나로 합쳤습니다.")
+    result.tools = merged
+    for t in result.tools:
+        if t["name"] == "get_route":
+            fix_route_clock(t["args"], message, now, result.guards)
     return result
+
+
+def fix_route_clock(args, message, now, guards):
+    """메시지에 '6시에 퇴근', '7시까지'가 있는데 모델이 그 시각을 빠뜨리거나 지금 시각을 넣었으면 메시지의 시각으로 고친다."""
+    for key, said in route_clocks(message, now).items():
+        try:
+            got = datetime.fromisoformat(str(args.get(key) or ""))
+            got = got if got.tzinfo else got.replace(tzinfo=now.tzinfo)
+        except ValueError:
+            got = None   # 비었거나 못 읽는 값
+        if got is None or (abs((got - now).total_seconds()) < 300 and got != datetime.fromisoformat(said)):
+            args[key] = said
+            guards.append(f"get_route 의 {key} 를 메시지에 나온 시각 {said[11:16]}(으)로 고쳤습니다.")
 
 
 def choose(message, history, now, location, llm):
