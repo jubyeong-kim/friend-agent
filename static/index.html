@@ -954,7 +954,8 @@ function paintDay() {
   const rows = items.map(it => {
     const dim = it.type === "r" && it.status !== "pending";
     const tag = it.type === "r" ? STATUS[it.status] : "기억";
-    const act = it.type === "e" ? `<button class="x" data-mem="${it.id}">지우기</button>` : it.status === "pending" ? `<button class="x" data-rem="${it.id}">취소</button>` : "";
+    const act = it.type === "e" ? `<button class="x" data-mem="${it.id}">지우기</button>`
+      : `<button class="x" data-card="${it.id}" aria-label="이 약속을 그림으로 보기">그림</button>` + (it.status === "pending" ? `<button class="x" data-rem="${it.id}">취소</button>` : "");
     return `<div class="it${dim ? " dim" : ""}"><span class="tm">${it.time || "—"}</span><span class="k ${it.type}">${tag}</span><span class="tx">${esc(it.type === "e" ? short(it.text) : it.text)}</span>${act}</div>`;
   }).join("");
   $("#dayCard").innerHTML = `<h3>${mo}월 ${da}일 (${WD[d.getDay()]})${cal.sel === todayKey() ? " · 오늘" : ""}</h3>
@@ -987,9 +988,23 @@ $("#calToday").onclick = () => {
   const dir = Math.sign(firstOfMonth(new Date()) - cal.month);
   cal.month = firstOfMonth(new Date()); cal.sel = todayKey(); paintCalendar(dir); paintDay();
 };
+// 약속 카드 그림: 로그인 토큰을 붙여야 해서 주소를 바로 열지 않고, 받아 온 PNG 를 새 탭에 연다
+async function openCard(id) {
+  const tab = window.open("", "_blank");  // 클릭한 순간 열어 두어야 팝업 차단에 걸리지 않는다
+  try {
+    const r = await api(`/api/reminders/${id}/card.png`, {raw: true});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    const url = URL.createObjectURL(await r.blob());
+    if (tab) tab.location = url; else window.open(url, "_blank");
+  } catch (err) {
+    tab?.close();
+    alert("약속 그림을 만들지 못했어요: " + err.message);
+  }
+}
 async function removeItem(e) {
   const b = e.target.closest("button.x");
   if (!b) return;
+  if (b.dataset.card) return openCard(b.dataset.card);
   if (b.dataset.mem) { await api(`/api/memories/${b.dataset.mem}`, {method: "DELETE"}); refreshCount(); }
   if (b.dataset.rem) await api(`/api/reminders/${b.dataset.rem}`, {method: "DELETE"});
   const [mems, rems] = await Promise.all([api("/api/memories"), api("/api/reminders")]);

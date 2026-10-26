@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from app import memory, router, tools, when
+from app import card, memory, router, tools, when
 from app.main import app, store
 
 client = TestClient(app)
@@ -158,3 +158,12 @@ def test_route_tool_adds_travel_time_to_departure(monkeypatch):
 def test_ocr_is_off_by_default():
     r = client.post("/api/ocr", files={"photo": ("a.png", b"x", "image/png")})
     assert r.status_code == 404
+
+
+def test_reminder_card_without_korean_font_says_so(monkeypatch):
+    # 한글 글꼴이 있는지는 테스트가 도는 곳마다 달라서, 글꼴이 없는 상황을 만들어 안내가 나오는지만 본다
+    monkeypatch.delenv("CARD_FONT", raising=False)
+    monkeypatch.setattr(card, "FONT_PATHS", [])
+    reminder = store.add_reminder("local-user", "그림 테스트 약속", datetime.now(timezone.utc) + timedelta(days=1))
+    r = client.get(f"/api/reminders/{reminder['id']}/card.png")
+    assert r.status_code == 500 and "한글 글꼴" in r.json()["detail"]
