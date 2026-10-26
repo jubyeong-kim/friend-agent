@@ -8,6 +8,7 @@
 - /api/greeting: 앱을 열 때 먼저 말 걸기
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
 - /api/memories, /api/reminders, /api/data: 기억, 약속, 내 데이터 관리
+- /api/reminders/{id}/card.png: 약속 하나를 카드 그림으로(한글 글꼴이 필요하다)
 - /api/holidays: 달력에 칠할 공휴일
 """
 import html
@@ -17,10 +18,10 @@ import time
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, memory, ocr, when
+from app import agent, card, memory, ocr, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
@@ -231,6 +232,19 @@ def list_reminders(user: User = Depends(current_user)):
         items.append({"id": r["id"], "text": r["text"], "status": r["status"], "due_label": when.label(local),
                       "date": local.date().isoformat(), "time": f"{local:%H:%M}"})
     return items
+
+
+@app.get("/api/reminders/{reminder_id}/card.png")
+def reminder_card(reminder_id: int, user: User = Depends(current_user)):
+    found = next((r for r in store.list_reminders(user.id) if r["id"] == reminder_id), None)
+    if not found:
+        raise HTTPException(404, "약속을 찾지 못했습니다")
+    tz = when.now_in(store.get_settings(user.id)["timezone"]).tzinfo
+    try:
+        png = card.draw_reminder(found["text"], when.label(found["due_at"].astimezone(tz)))
+    except card.CardError as error:
+        raise HTTPException(500, str(error)) from error
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/holidays")
