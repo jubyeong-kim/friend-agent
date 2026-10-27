@@ -74,3 +74,16 @@ jobs:
         run: |
           echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
           echo "배포한 이미지 $DEPLOY_IMAGE"
+
+      # 사람이 채우던 연결표 대신, 배포가 끝난 뒤 실제로 트래픽을 받는 리비전의 값을 실행 요약에 남긴다.
+      - name: 배포 기록 남기기
+        run: |
+          REVISION=$(gcloud run services describe "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format json | jq -r '.status.traffic | max_by(.percent) | .revisionName')
+          DIGEST=$(gcloud run revisions describe "$REVISION" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format 'value(status.imageDigest)')
+          {
+            echo "### 배포 기록 (${{ vars.ENV }})"
+            echo ""
+            echo "| 서비스 | 커밋 | 리비전 | 다이제스트 |"
+            echo "| --- | --- | --- | --- |"
+            echo "| ${{ vars.SERVICE }} | \`$DEPLOY_COMMIT\` | \`$REVISION\` | \`${DIGEST#*@}\` |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
