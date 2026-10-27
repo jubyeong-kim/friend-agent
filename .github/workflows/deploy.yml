@@ -33,11 +33,30 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v3
 
-      - name: 이미지 만들기와 올리기
+      - name: 이미지 만들기와 올리기 (staging)
+        if: github.ref_name == 'staging'
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
           docker build --tag "$IMAGE" .
           docker push "$IMAGE"
+          echo "DEPLOY_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "DEPLOY_COMMIT=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # main 에서는 이미지를 다시 만들지 않고, staging 에서 트래픽을 가장 많이 받는 리비전의 이미지를 다이제스트로 가져간다.
+      - name: staging 이미지 찾기 (production 승격)
+        if: github.ref_name == 'main'
+        run: |
+          REVISION=$(gcloud run services describe friend-agent-staging --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format json | jq -r '.status.traffic | max_by(.percent) | .revisionName')
+          REV_JSON=$(gcloud run revisions describe "$REVISION" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format json)
+          DIGEST=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
+          COMMIT=$(echo "$REV_JSON" | jq -r '.spec.containers[0].env[] | select(.name == "COMMIT_SHA") | .value')
+          case "$DIGEST" in *@sha256:*) ;; *) echo "다이제스트가 아니다: $DIGEST"; exit 1 ;; esac
+          [ -n "$COMMIT" ] || { echo "staging 에 COMMIT_SHA 가 없다"; exit 1; }
+          echo "승격할 staging 리비전 $REVISION"
+          echo "다이제스트 $DIGEST"
+          echo "커밋 $COMMIT"
+          echo "DEPLOY_IMAGE=$DIGEST" >> "$GITHUB_ENV"
+          echo "DEPLOY_COMMIT=$COMMIT" >> "$GITHUB_ENV"
 
       - id: deploy
         uses: google-github-actions/deploy-cloudrun@v3
@@ -45,13 +64,13 @@ jobs:
           service: ${{ vars.SERVICE }}
           region: us-central1
           project_id: ${{ vars.GCP_PROJECT_ID }}
-          image: ${{ env.IMAGE }}
+          image: ${{ env.DEPLOY_IMAGE }}
           env_vars: |
-            COMMIT_SHA=${{ github.sha }}
+            COMMIT_SHA=${{ env.DEPLOY_COMMIT }}
             ENV=${{ vars.ENV }}
           flags: --service-account=${{ vars.RUNTIME_SA }}
 
       - name: 배포 결과
         run: |
           echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
-          echo "배포한 이미지 $IMAGE"
+          echo "배포한 이미지 $DEPLOY_IMAGE"
