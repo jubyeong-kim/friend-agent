@@ -1,7 +1,8 @@
 """메시지마다 쓸 도구를 고르는 도구 선택기.
 
-1. 모델이 메시지와 최근 대화를 읽고 도구를 0~2개 고른다. 확신도(0~1)와 이유를 함께 낸다.
+1. 모델이 메시지와 최근 대화를 읽고 도구를 고른다(약속 저장은 최대 5개, 다른 도구는 최대 2개). 확신도(0~1)와 이유를 함께 낸다.
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
+   메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 """
 import re
@@ -12,6 +13,8 @@ from app import when
 from app.logs import log
 from app.tools import CITIES, TOOLS
 
+# 약속 저장은 다른 도구와 따로 센다. 일정표 사진 한 장에 일정이 여러 개 있다(2개 한도일 때 세 번째 일정이 약속으로 저장되지 않았다)
+MAX_REMINDERS = 5
 CONFIDENCE_THRESHOLD = 0.6
 MAX_TOOLS = 2
 
@@ -45,7 +48,8 @@ def router_prompt():
         "",
         "규칙:",
         "- 도구가 필요 없는 일상 대화면 tools 를 빈 배열로 둔다. 대부분의 메시지는 여기에 해당한다.",
-        f"- 꼭 필요한 도구만 최대 {MAX_TOOLS}개 고른다. 묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
+        f"- 꼭 필요한 도구만 고른다. create_reminder 는 약속마다 하나씩 최대 {MAX_REMINDERS}개, 다른 도구는 합쳐서 최대 {MAX_TOOLS}개다. "
+        "묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
         "- 날씨나 미세먼지 이야기를 해도 예보를 묻는 게 아니라 경험이나 하소연이면 도구를 쓰지 않는다.",
         "- location 은 메시지에 도시 이름이 있으면 그 도시, 없으면 사용자 지역이다.",
         "- date 는 [달력]을 보고 정한 YYYY-MM-DD 날짜다. 날짜 표현이 없으면 오늘이다.",
@@ -73,6 +77,7 @@ class ToolChoice:
     decided_by: str                      # model, rule
     action: str = "answer"               # answer, clarify
     guards: list = field(default_factory=list)
+    dropped: list = field(default_factory=list)  # 한도를 넘어 쓰지 않은 도구. 답이 처리하지 못했다고 말하게 한다
 
 
 # ── 키워드 규칙 ─────────────────────────────────────────────────────
@@ -166,7 +171,7 @@ def model_choose(message, history, now, location, llm):
         if isinstance(t, dict) and t.get("name") in TOOLS:
             tools.append({"name": t["name"], "args": t.get("args") if isinstance(t.get("args"), dict) else {}})
     confidence = max(0.0, min(1.0, float(data.get("confidence", 0))))
-    result = ToolChoice(tools[:MAX_TOOLS], confidence, str(data.get("reason", "")), "model")
+    result = ToolChoice(tools, confidence, str(data.get("reason", "")), "model")
 
     # 안전장치: 지난 연도로 적힌 날짜는 올해로 고친다
     for t in result.tools:
@@ -192,6 +197,9 @@ def model_choose(message, history, now, location, llm):
     for t in result.tools:
         if t["name"] == "get_route":
             fix_route_clock(t["args"], message, now, result.guards)
+        elif t["name"] == "create_reminder":
+            keep_written_date(t["args"], message, now, result.guards)
+    result.tools, result.dropped = limit_tools(result.tools, result.guards)
     return result
 
 
@@ -206,6 +214,51 @@ def fix_route_clock(args, message, now, guards):
         if got is None or (abs((got - now).total_seconds()) < 300 and got != datetime.fromisoformat(said)):
             args[key] = said
             guards.append(f"get_route 의 {key} 를 메시지에 나온 시각 {said[11:16]}(으)로 고쳤습니다.")
+
+
+def keep_written_date(args, message, now, guards):
+    """메시지에 적힌 날짜가 이미 지났는데 모델이 그 일정을 오늘이나 앞날로 옮겼으면 적힌 날짜로 되돌린다.
+
+    production 에서 10월 21일, 23일 일정표 사진을 27일에 보냈더니 모델이 둘 다 27일 같은 시각으로 옮겨 저장했다.
+    되돌린 시각은 create_reminder 가 '이미 지난 시각'으로 거절한다.
+    """
+    try:
+        due = datetime.fromisoformat(str(args.get("due_at") or ""))
+    except ValueError:
+        return  # 못 읽는 값은 create_reminder 가 거절한다
+    due = (due if due.tzinfo else due.replace(tzinfo=now.tzinfo)).astimezone(now.tzinfo)
+    written = when.written_dates(message, now)
+    if not written or due.date() in {day for day, _ in written}:
+        return  # 적힌 날짜가 없거나, 적힌 날짜 중 하나를 그대로 썼다
+    day = written_day(str(args.get("text") or ""), written)
+    if day is None or day >= now.date() or due.date() < day:
+        return  # 어느 줄의 날짜인지 모르거나, 아직 오지 않은 날이거나('30일 회의 하루 전에'), 앞날로 옮긴 게 아니다
+    args["due_at"] = due.replace(year=day.year, month=day.month, day=day.day).isoformat()
+    guards.append(f"create_reminder 의 날짜를 메시지에 적힌 {day.month}월 {day.day}일로 되돌렸습니다(이미 지난 날짜).")
+
+
+def written_day(text, written):
+    """약속 내용('정기 모임')의 낱말이 가장 많이 든 줄의 날짜. 맞는 줄이 없으면 적힌 날짜가 하나뿐일 때만 그 날짜. 정할 수 없으면 None."""
+    words = [w for w in re.findall(r"[가-힣A-Za-z0-9]+", text) if len(w) >= 2]
+    scores = [(sum(w in line for w in words), day) for day, line in written]
+    best = max(score for score, _ in scores)
+    days = {day for score, day in scores if score == best}
+    return days.pop() if len(days) == 1 else None
+
+
+def limit_tools(tools, guards):
+    """약속 저장은 최대 MAX_REMINDERS 개, 다른 도구는 합쳐서 최대 MAX_TOOLS 개만 남긴다. (남긴 것, 뺀 것)을 돌려준다.
+
+    뺀 것을 말없이 버리면 답이 그 약속까지 저장했다고 말할 수 있다. 그래서 뺀 것을 돌려주고 메모를 남긴다.
+    """
+    kept, dropped = [], []
+    for t in tools:
+        reminder = t["name"] == "create_reminder"
+        same_kind = sum((k["name"] == "create_reminder") == reminder for k in kept)
+        (kept if same_kind < (MAX_REMINDERS if reminder else MAX_TOOLS) else dropped).append(t)
+    if dropped:
+        guards.append(f"도구 한도(약속 {MAX_REMINDERS}개, 다른 도구 {MAX_TOOLS}개)를 넘어 {len(dropped)}개를 쓰지 않았습니다.")
+    return kept, dropped
 
 
 def choose(message, history, now, location, llm):
@@ -230,7 +283,7 @@ def choose(message, history, now, location, llm):
     if result.confidence < CONFIDENCE_THRESHOLD:
         result.action = "clarify"
         result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
-        result.tools = []
+        result.tools, result.dropped = [], []
 
     log("INFO", "도구 선택", tools=[t["name"] for t in result.tools], confidence=round(result.confidence, 2),
         decided_by=result.decided_by, action=result.action)

@@ -3,8 +3,9 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from app import card, memory, router, tools, when
+from app import agent, card, memory, router, tools, when
 from app.main import app, store
+from app.persona import DEFAULT_CHARACTER
 
 client = TestClient(app)
 
@@ -128,6 +129,69 @@ def test_model_route_calls_are_merged_and_clock_fixed():
     choice = router.choose("6시에 퇴근하고 낙성대역에서 경복궁역 가면 7시까지 도착할 수 있어?", [], now, "서울", Split())
     assert choice.tools == [{"name": "get_route", "args": {"origin": "낙성대역", "destination": "경복궁역",
                                                            "depart_at": "2026-10-21T18:00:00+09:00", "arrive_by": "2026-10-21T19:00:00+09:00"}}]
+
+
+# 샘플 사진(data/samples/schedule.png)을 production 에서 읽은 글. 세 일정 모두 10월 27일 기준으로 지난 날짜다
+SCHEDULE = ("산책 동아리 10월 일정\n10월 넷째 주 공지\n"
+            "10월 21일 수요일 19:00       정기 모임 (학생회관 302호)\n"
+            "10월 23일 금요일 18:30       회비 납부 마감\n"
+            "10월 25일 일요일 10:00       북한산 산책 (정문 앞 집합)\n"
+            "문의: 동아리 운영진")
+KST = timezone(timedelta(hours=9))
+
+
+class Picks:  # 모델 대신 정해 둔 도구 선택을 돌려준다
+    can_reason = True
+
+    def __init__(self, *tools):
+        self.tools = list(tools)
+
+    def complete_json(self, system, user):
+        return {"tools": self.tools, "confidence": 0.9, "reason": "정해 둔 응답"}
+
+
+def reminder(text, due_at):
+    return {"name": "create_reminder", "args": {"text": text, "due_at": due_at}}
+
+
+def test_past_written_date_is_not_moved_to_today():
+    # production 에서 실제로 본 모델 응답: 10월 21일, 23일 일정을 오늘(27일) 같은 시각으로 옮겼다
+    now = datetime(2026, 10, 27, 11, 52, tzinfo=KST)
+    moved = Picks(reminder("정기 모임", "2026-10-27T19:00:00+09:00"), reminder("회비 납부 마감", "2026-10-27T18:30:00+09:00"))
+    message = f"사진에서 읽은 글이야. 여기 있는 일정 중에 알려 줘야 할 게 있으면 약속으로 저장해 줘.\n{SCHEDULE}"
+    choice = router.choose(message, [], now, "서울", moved)
+    assert [t["args"]["due_at"] for t in choice.tools] == ["2026-10-21T19:00:00+09:00", "2026-10-23T18:30:00+09:00"]
+    assert sum("되돌렸습니다" in g for g in choice.guards) == 2
+    ctx = tools.Context(store, "date-test", "서울", "Asia/Seoul")
+    results = [tools.run_tool(t["name"], t["args"], ctx) for t in choice.tools]
+    assert not any(r.ok for r in results) and all("이미 지난" in r.summary for r in results)
+
+
+def test_day_before_a_coming_date_is_kept():
+    now = datetime(2026, 10, 27, 11, 52, tzinfo=KST)
+    choice = router.choose("10월 30일 회의 하루 전에 알려 줘", [], now, "서울", Picks(reminder("회의 준비", "2026-10-29T09:00:00+09:00")))
+    assert choice.tools[0]["args"]["due_at"] == "2026-10-29T09:00:00+09:00" and not choice.guards
+
+
+def test_reminders_have_their_own_limit_and_the_rest_is_kept_for_the_answer():
+    now = datetime(2026, 10, 27, 11, 52, tzinfo=KST)
+    many = [reminder(f"일정 {i}", f"2026-11-{i:02d}T09:00:00+09:00") for i in range(1, 7)]
+    weather = [{"name": "get_weather", "args": {"location": city, "date": "2026-10-28"}} for city in ("서울", "부산", "대구")]
+    choice = router.choose("일정이랑 날씨 알려 줘", [], now, "서울", Picks(*many, *weather))
+    names = [t["name"] for t in choice.tools]
+    assert names.count("create_reminder") == 5 and names.count("get_weather") == 2
+    assert [t["args"].get("text") or t["args"]["location"] for t in choice.dropped] == ["일정 6", "대구"]
+    assert any("한도" in g for g in choice.guards)
+
+
+def test_answer_is_told_which_reminders_were_really_saved():
+    saved = tools.ToolResult("create_reminder", True, "약속을 저장했습니다: 10월 28일(수) 19:00에 '정기 모임'.")
+    refused = tools.ToolResult("create_reminder", False, "약속을 저장하지 않았습니다: 이미 지난 시각입니다.")
+    facts = agent.reminder_facts([saved, refused], [reminder("북한산 산책", "2026-11-01T10:00:00+09:00")])
+    assert [line.split(" - ")[0] for line in facts] == ["방금 저장함", "저장 못 함", "저장 못 함"] and "북한산 산책" in facts[2]
+    system = agent.system_prompt(DEFAULT_CHARACTER, datetime(2026, 10, 27, 11, 52, tzinfo=KST), "서울", [], None, facts=facts)
+    assert "[이번 턴 약속 저장 결과: 사실]" in system and "저장했다거나 저장하겠다고 말하지 않는다" in system
+    assert agent.reminder_facts([tools.ToolResult("get_weather", True, "맑음")], []) == []
 
 
 def test_route_tool_without_key_does_not_guess(monkeypatch):

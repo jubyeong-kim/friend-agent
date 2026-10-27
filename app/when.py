@@ -102,6 +102,17 @@ def event_day(text, ref):
     return day, (f"{int(t.group(1)):02d}:{t.group(2)}" if t else None)
 
 
+def written_dates(text, ref):
+    """메시지에 '10월 21일'처럼 적힌 날짜를 그 줄과 함께 모두 꺼낸다. [(날짜, 줄)]. 연도는 event_day 와 같이 정한다."""
+    found = []
+    for line in text.splitlines():
+        for m in re.finditer(r"\d{1,2}월\s*\d{1,2}일", line):
+            day, _ = event_day(m.group(0), ref)
+            if day:
+                found.append((day, line))
+    return found
+
+
 def fix_year(value, now):
     """모델이 학습 시점의 연도(예: 2023)를 쓰는 경우가 있다. 지난 연도면 올해로 바꾼다. 바꿨으면 True."""
     text = str(value or "")
