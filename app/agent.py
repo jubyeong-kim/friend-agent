@@ -1,9 +1,9 @@
 """메시지 하나를 처리하는 흐름(한 턴).
 
 ① 안전장치: 위기 표현이면 정해진 안전 응답으로 끝낸다(코드 규칙).
-② 도구 선택: 모델이 도구를 0~2개 고른다. 확신이 낮으면 되묻는다(router.py).
+② 도구 선택: 모델이 도구를 고른다(약속 저장 최대 5개, 다른 도구 최대 2개). 확신이 낮으면 되묻는다(router.py).
 ③ 도구 실행: 날씨, 미세먼지, 공휴일, 이동 시간, 약속(tools.py).
-④ 답 생성: 캐릭터 지시문 + 기억 + 도구 결과 + 최근 대화로 답을 스트리밍한다.
+④ 답 생성: 캐릭터 지시문 + 기억 + 도구 결과 + 약속 저장 결과(사실) + 최근 대화로 답을 스트리밍한다.
 ⑤ 기억 정리: 답을 다 보낸 뒤 같은 요청 안에서 기억 메모와 대화 요약을 갱신한다(memory.py).
    Cloud Run 기본 설정(요청 기반 과금)에서는 응답이 끝난 뒤 CPU가 거의 주어지지 않아서,
    응답 뒤 백그라운드로 돌리면 기억 정리가 멈추거나 늦어진다. 그래서 응답을 닫기 전에 처리한다.
@@ -16,7 +16,7 @@ from datetime import timedelta
 from app import memory, when
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, build_persona
-from app.router import choose
+from app.router import MAX_REMINDERS, choose
 from app.safety import CRISIS_REPLY, is_crisis
 from app.tools import TOOLS, Context, run_tool
 
@@ -32,7 +32,23 @@ def upcoming_reminders(store, uid, now):
     return [f"{when.label(r['due_at'].astimezone(now.tzinfo))} '{r['text']}'" for r in items[:5]]
 
 
-def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False, upcoming=()):
+def reminder_facts(results, dropped):
+    """이번 턴에 약속을 실제로 저장했는지를 사실 줄로 모은다. 약속 저장을 시도하지 않았으면 빈 목록.
+
+    도구 결과만 넣었을 때 답이 저장하지 않은 일정을 '저장할게'라고 말했다(production 에서 확인).
+    """
+    lines = []
+    for r in results:
+        if r.name != "create_reminder":
+            continue
+        state = "저장 못 함" if not r.ok else "이미 있던 약속" if r.data.get("duplicate") else "방금 저장함"
+        lines.append(f"{state} - {r.summary}")
+    lines += [f"저장 못 함 - '{t['args'].get('text', '')}' 약속은 한 번에 {MAX_REMINDERS}개까지만 저장해서 처리하지 못했습니다."
+              for t in dropped if t["name"] == "create_reminder"]
+    return lines
+
+
+def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False, upcoming=(), facts=()):
     parts = [build_persona(character),
              f"[지금] {when.label(now)} ({now.tzinfo}), 사용자 지역: {location}\n[달력]\n{when.calendar_hint(now)}"]
     block = memory.memory_block(memories, summary)
@@ -42,6 +58,10 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
         parts.append("[다가오는 약속: 사용자가 알려 달라고 저장해 둔 것]\n" + "\n".join(f"- {line}" for line in upcoming))
     if tool_lines:
         parts.append("[도구 결과]\n" + "\n".join(f"- {line}" for line in tool_lines))
+    if facts:
+        parts.append("[이번 턴 약속 저장 결과: 사실]\n" + "\n".join(f"- {line}" for line in facts) +
+                     "\n'방금 저장함'에 없는 약속은 저장했다거나 저장하겠다고 말하지 않는다. 저장하지 못한 약속은 못 했다고 말하고, "
+                     "이유가 지난 시각이면 이미 지난 일정이라고 말한다. 저장한 약속은 위에 적힌 날짜와 시각 그대로 말한다.")
     if clarify:
         parts.append("[되묻기]\n사용자가 무엇을 원하는지 확실하지 않다. 짧게 되물어서 확인한다.")
     return "\n\n".join(parts)
@@ -94,7 +114,8 @@ def run_turn(message, uid, llm, store, show_panel):
     # ④ 답 생성
     upcoming = upcoming_reminders(store, uid, now)
     system = system_prompt(character, now, settings["location"], memories, summary,
-                           [r.summary for r in results], clarify=choice.action == "clarify", upcoming=upcoming)
+                           [r.summary for r in results], clarify=choice.action == "clarify", upcoming=upcoming,
+                           facts=reminder_facts(results, choice.dropped))
     if show_panel:
         yield {"type": "context", "memories": [m["text"] for m in memories], "upcoming": upcoming,
                "summary": summary["text"] if summary else None, "recent_messages": len(history)}
