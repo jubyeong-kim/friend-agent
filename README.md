@@ -52,6 +52,7 @@ cd <저장소 이름>
 | `data/eval/` | 평가 데이터: 도구 선택 46개, 기억 정리 15개, 안전 15개 |
 | `scripts/eval_tools.py` | 도구 선택 평가 |
 | `scripts/watch_requests.py` | 배포 중 끊김 측정. `/version` 에 0.2초마다 요청하고 리비전별 응답 수와 실패 수를 요약(최대 5분, AI 호출 없음) |
+| `scripts/health_check.py` | 내 컴퓨터 Nginx 실습용 능동 헬스체크. 서버마다 `/health` 를 5초마다 확인해, 연속 2번 실패하면 upstream 에서 빼고 연속 2번 성공하면 다시 넣는다(`nginx -t` 통과 때만 reload) |
 | `tests/` | 가짜 응답으로 돌리는 테스트 |
 | `hello/` | 배포 연습용 최소 앱(AI를 부르지 않음) |
 | `Procfile` | Cloud Run이 앱을 시작할 때 쓰는 명령 |
