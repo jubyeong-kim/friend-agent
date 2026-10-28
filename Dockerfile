@@ -21,4 +21,5 @@ RUN useradd --create-home appuser
 USER appuser
 
 # 6) Cloud Run이 정해 주는 PORT 환경변수로 실행한다. 노트북에서는 기본값 8080.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+#    exec 로 sh 대신 uvicorn 이 1번 프로세스가 되어, 끌 때 보내는 종료 신호(SIGTERM)를 직접 받고 정상 종료한다.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
