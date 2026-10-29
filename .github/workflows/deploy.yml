@@ -69,11 +69,45 @@ jobs:
             COMMIT_SHA=${{ env.DEPLOY_COMMIT }}
             ENV=${{ vars.ENV }}
           flags: --service-account=${{ vars.RUNTIME_SA }} --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=12,timeoutSeconds=2
+          # 블루그린: 새 리비전은 트래픽 0%로 올리고 green 태그를 붙인다. tag 를 주면 url 출력은 서비스 주소가 아니라 태그 주소다.
+          no_traffic: true
+          tag: green
 
       - name: 배포 결과
         run: |
-          echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
+          echo "새 리비전 태그 주소 ${{ steps.deploy.outputs.url }}"
           echo "배포한 이미지 $DEPLOY_IMAGE"
+
+      # 전환 전에 태그 주소로 새 리비전만 확인한다. 끝까지 통과하지 못하면 이 단계가 실패로 끝나고 전환 단계는 실행되지 않는다.
+      - name: 스모크 테스트 (태그 주소)
+        env:
+          TAG_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          case "$TAG_URL" in https://green---*) ;; *) echo "태그 주소가 아니다: $TAG_URL"; exit 1 ;; esac
+          for i in $(seq 1 10); do
+            HEALTH=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$TAG_URL/health" || true)
+            VERSION=$(curl -s --max-time 5 "$TAG_URL/version" || true)
+            COMMIT=$(echo "$VERSION" | jq -r '.commit // empty' 2>/dev/null || true)
+            REVISION=$(echo "$VERSION" | jq -r '.revision // empty' 2>/dev/null || true)
+            echo "$i번째 /health $HEALTH, commit $COMMIT, 리비전 $REVISION"
+            if [ "$HEALTH" = "200" ] && [ "$COMMIT" = "$DEPLOY_COMMIT" ] && [ -n "$REVISION" ]; then
+              echo "스모크 테스트 통과"
+              echo "NEW_REVISION=$REVISION" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "스모크 테스트 실패: 새 리비전은 0%로 두고 전환하지 않는다"
+          exit 1
+
+      # 스모크 테스트에 답한 바로 그 리비전으로 100% 옮긴다. 옮기기 전 리비전은 롤백할 곳으로 남긴다.
+      - name: 전환 (새 리비전으로 100%)
+        run: |
+          PREV=$(gcloud run services describe "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format json | jq -r '.status.traffic | max_by(.percent) | .revisionName')
+          echo "전환 전 리비전(롤백할 곳) $PREV"
+          echo "전환할 리비전 $NEW_REVISION"
+          gcloud run services update-traffic "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --to-revisions "$NEW_REVISION=100"
+          echo "PREV_REVISION=$PREV" >> "$GITHUB_ENV"
 
       # 사람이 채우던 연결표 대신, 배포가 끝난 뒤 실제로 트래픽을 받는 리비전의 값을 실행 요약에 남긴다.
       - name: 배포 기록 남기기
@@ -83,7 +117,7 @@ jobs:
           {
             echo "### 배포 기록 (${{ vars.ENV }})"
             echo ""
-            echo "| 서비스 | 커밋 | 리비전 | 다이제스트 |"
-            echo "| --- | --- | --- | --- |"
-            echo "| ${{ vars.SERVICE }} | \`$DEPLOY_COMMIT\` | \`$REVISION\` | \`${DIGEST#*@}\` |"
+            echo "| 서비스 | 커밋 | 리비전 | 이전 리비전(롤백할 곳) | 다이제스트 |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| ${{ vars.SERVICE }} | \`$DEPLOY_COMMIT\` | \`$REVISION\` | \`$PREV_REVISION\` | \`${DIGEST#*@}\` |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
