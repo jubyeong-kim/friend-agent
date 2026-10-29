@@ -1,0 +1,56 @@
+# Actions 탭의 Run workflow 버튼으로 서비스 트래픽 100%를 지정한 리비전으로 옮긴다(원클릭 롤백).
+# 되돌아갈 리비전 이름은 배포 실행 요약의 「이전 리비전(롤백할 곳)」 칸에서 복사한다. 새 버전으로 다시 갈 때도 같은 버튼에 그 리비전 이름을 넣는다.
+# 이미지를 만들거나 배포하지 않고 트래픽 설정만 바꾼다. production 을 고르면 배포와 같은 production 승인을 거친다.
+name: rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 되돌릴 환경
+        type: choice
+        options: [production, staging]
+        default: production
+      revision:
+        description: 옮겨 갈 리비전 이름 (예 friend-agent-00025-dhw)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # 입력값은 환경변수로만 넘긴다. 스크립트에 바로 끼워 넣으면 입력한 글자가 명령으로 실행될 수 있다.
+      - name: 롤백 (지정한 리비전으로 100%)
+        env:
+          TARGET: ${{ inputs.revision }}
+          SERVICE: ${{ vars.SERVICE }}
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          OWNER=$(gcloud run revisions describe "$TARGET" --region us-central1 --project "$PROJECT" --format "value(metadata.labels.'serving.knative.dev/service')")
+          [ "$OWNER" = "$SERVICE" ] || { echo "$SERVICE 의 리비전이 아니다: $TARGET"; exit 1; }
+          BEFORE=$(gcloud run services describe "$SERVICE" --region us-central1 --project "$PROJECT" --format json | jq -r '.status.traffic | max_by(.percent) | .revisionName')
+          echo "지금 리비전 $BEFORE → 옮겨 갈 리비전 $TARGET"
+          gcloud run services update-traffic "$SERVICE" --region us-central1 --project "$PROJECT" --to-revisions "$TARGET=100"
+          URL=$(gcloud run services describe "$SERVICE" --region us-central1 --project "$PROJECT" --format 'value(status.url)')
+          VERSION=$(curl -s --max-time 10 "$URL/version" || true)
+          echo "서비스 주소 /version $VERSION"
+          {
+            echo "### 롤백 기록 (${{ vars.ENV }})"
+            echo ""
+            echo "| 서비스 | 옮기기 전 리비전 | 옮긴 리비전 | /version 커밋 |"
+            echo "| --- | --- | --- | --- |"
+            echo "| $SERVICE | \`$BEFORE\` | \`$TARGET\` | \`$(echo "$VERSION" | jq -r '.commit // empty' 2>/dev/null)\` |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
