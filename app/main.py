@@ -82,6 +82,9 @@ def home():
 
 @app.get("/health")
 def health():
+    # 스테이지 6 시험용 고장: Cloud Run 안(K_SERVICE 가 있음)에서만 늘 503. CI 테스트는 통과한다. 시험 뒤 Revert 한다.
+    if os.environ.get("K_SERVICE"):
+        return JSONResponse({"status": "broken"}, status_code=503)
     return {"status": "ok"}
 
 
