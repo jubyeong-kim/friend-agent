@@ -1,6 +1,6 @@
-"""Langfuse 에 닿지 못할 때 요청이 오래 멈추지 않는지, 임시 진단 로그가 원문을 남기지 않는지. 실제 Langfuse 는 부르지 않는다."""
+"""Langfuse 에 닿지 못할 때 요청이 오래 멈추지 않는지, 들어온 요청의 표본 결정에 트레이스가 끌려가지 않는지.
+실제 Langfuse 는 부르지 않는다."""
 import time
-from types import SimpleNamespace
 
 from app import tracing
 
@@ -50,21 +50,3 @@ def test_trace_is_recorded_even_if_request_says_not_sampled(monkeypatch):
     ctx = roots[0].span._otel_span.get_span_context()
     assert ctx.trace_flags.sampled
     assert ctx.trace_id != int("1" * 32, 16)  # 들어온 traceparent 를 부모로 삼지 않았다
-
-
-class FakeExporter:
-    def export(self, spans):
-        return SimpleNamespace(name="SUCCESS")
-
-    def shutdown(self):
-        return "shut"
-
-
-def test_export_log_keeps_only_counts_and_trace_prefix(monkeypatch, capsys):
-    span = SimpleNamespace(context=SimpleNamespace(trace_id=int(TRACE, 16)), attributes={"input": "비밀 대화"})
-    wrapped = tracing._ExportLog(FakeExporter())
-    assert wrapped.export([span, span]).name == "SUCCESS"
-    assert wrapped.shutdown() == "shut"           # 나머지는 그대로 넘긴다
-    out = capsys.readouterr().out
-    assert '"spans": 2' in out and TRACE[:8] in out
-    assert "비밀 대화" not in out and TRACE not in out  # 원문도, 트레이스 ID 전체도 없다
