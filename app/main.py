@@ -6,6 +6,7 @@
 - /api/character, /api/settings: 캐릭터와 사용자 설정
 - /api/chat: 메시지 한 턴. 결과를 이벤트(JSON 한 줄씩)로 스트리밍한다
 - /api/greeting: 앱을 열 때 먼저 말 걸기
+- /api/feedback, /api/report: 답에 좋아요·별로예요, 신고. Langfuse 점수로 보낸다(user-feedback, report)
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
 - /api/memories, /api/reminders, /api/data: 기억, 약속, 내 데이터 관리
 - /api/reminders/{id}/card.png: 약속 하나를 카드 그림으로(한글 글꼴이 필요하다)
@@ -15,13 +16,14 @@ import html
 import json
 import os
 import time
+from typing import Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from app import agent, card, memory, ocr, when
+from app import agent, card, memory, ocr, tracing, when
 from app.auth import Auth, User
 from app.config import ROOT, load_settings
 from app.llm import make_llm
@@ -31,11 +33,14 @@ from app.store.base import make_store
 from app.tools import CITIES, holidays_of
 
 settings = load_settings()  # 꼭 필요한 값이 없으면 여기서 종료한다
+tracing.setup()             # .env 를 읽은 뒤에. Langfuse 키가 없으면 계측만 꺼진다
 llm = make_llm(settings)
 store = make_store(settings)
 current_user = Auth(settings)
 
-app = FastAPI(title="AI 친구 에이전트")
+# FastAPI 내장 OTel 추적을 끈다. 켜 두면 요청 span 이 들어온 traceparent 를 부모로 삼고, Cloud Run 앞단이
+# '표본 아님'으로 표시한 요청에선 그 아래 Langfuse 트레이스까지 기록되지 않아 빠진다(staging 5초 간격에서 절반 넘게).
+app = FastAPI(title="AI 친구 에이전트", telemetry={"tracing": False, "operation_spans": False})
 
 # 시작 지연 스위치(배포 실습용). 포트는 바로 열지만 정한 시간 동안은 준비 중이라 모든 요청에 503을 돌려준다.
 # AI 서비스가 시작할 때 모델 설정이나 색인을 불러오느라 늦게 준비되는 상황을 흉내 낸다. 기본값 0(끔).
@@ -69,6 +74,11 @@ class SettingsRequest(BaseModel):
 class ReportRequest(BaseModel):
     message_id: int
     reason: str = ""
+
+
+class FeedbackRequest(BaseModel):
+    message_id: int
+    value: Literal["up", "down"]  # 좋아요, 별로예요
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -191,10 +201,35 @@ async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
         raise HTTPException(500, str(error)) from error
 
 
+def my_reply(uid, message_id):
+    """로그인한 사용자의 캐릭터 답(assistant)만. 없거나, 남의 것이거나, 내 말이면 None."""
+    m = store.get_message(uid, message_id)
+    return m if m and m["role"] == "assistant" else None
+
+
+def score_reply(message, name, value, comment=None):
+    """답이 저장될 때 meta 에 넣은 트레이스로 점수를 보낸다. 트레이스 ID 가 없는 지난 답이나 키가 없으면 건너뛴다.
+    점수 시각을 답 저장 시각으로 고정해, 같은 답에 다시 누르면 새로 쌓지 않고 덮어쓴다."""
+    return tracing.score(message["meta"].get("trace_id"), name, value, comment, timestamp=message["created_at"])
+
+
+@app.post("/api/feedback")
+def feedback(req: FeedbackRequest, user: User = Depends(current_user)):
+    message = my_reply(user.id, req.message_id)
+    if not message:
+        raise HTTPException(404, "답을 찾지 못했습니다")
+    scored = score_reply(message, "user-feedback", 1 if req.value == "up" else 0)
+    log("INFO", "답 반응", value=req.value, scored=scored)
+    return {"ok": True, "scored": scored}
+
+
 @app.post("/api/report")
 def report(req: ReportRequest, user: User = Depends(current_user)):
-    # 지금은 로그로만 남긴다. 관측 도구를 붙이면 그 도구의 점수로 보낸다.
     log("WARNING", "부적절한 답변 신고", message_id=req.message_id, reason_length=len(req.reason))
+    # 응답은 지금처럼 늘 ok. 내 답일 때만 점수를 보낸다. 사유는 가린 뒤 comment 로(로그에는 길이만)
+    message = my_reply(user.id, req.message_id)
+    if message:
+        score_reply(message, "report", 1, req.reason.strip() or None)
     return {"ok": True}
 
 

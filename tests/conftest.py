@@ -4,5 +4,6 @@
 """
 import os
 
-os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory", "AUTH": "none"})
+os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory", "AUTH": "none",
+                   "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})  # 테스트 데이터를 Langfuse 로 보내지 않는다
 os.environ.setdefault("ENV", "test")
