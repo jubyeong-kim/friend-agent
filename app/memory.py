@@ -7,7 +7,7 @@
 import re
 from datetime import timedelta
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.safety import is_sensitive
 
@@ -105,19 +105,23 @@ def rule_extract(message, now):
     return {"add": found, "update": [], "remove": []}
 
 
-def update_memories(store, uid, user_message, reply, now, llm):
+def update_memories(store, uid, user_message, reply, now, llm, trace=None):
     """방금 턴에서 기억할 것을 뽑아 저장한다. 바뀐 내용을 돌려준다(화면 표시용)."""
     existing = store.list_memories(uid)
+    gen = (trace or tracing.Observation()).child("memory-update", "generation", model=getattr(llm, "model", None),
+                                                 input={"user": user_message, "assistant": reply})
     if getattr(llm, "can_reason", False):
         listed = "\n".join(f"- id={m['id']} ({m['kind']}) {m['text']}" for m in existing) or "(없음)"
         user = f"[지금] {now:%Y-%m-%d %H:%M}\n[달력]\n{when.calendar_hint(now)}\n[이미 있는 기억]\n{listed}\n\n[대화]\nuser: {user_message}\nassistant: {reply}"
         try:
-            plan = llm.complete_json(EXTRACT_PROMPT, user)
+            plan = gen.run(llm.complete_json, EXTRACT_PROMPT, user)
         except Exception as error:
             log("WARNING", "기억 정리 실패", error=type(error).__name__)
+            gen.end(level="ERROR", status_message=type(error).__name__)
             return {"added": [], "updated": [], "removed": []}
     else:
         plan = rule_extract(user_message, now)
+        gen.update(output=plan)
 
     known_ids = {m["id"]: m for m in existing}
     known_texts = {m["text"] for m in existing}
@@ -137,12 +141,14 @@ def update_memories(store, uid, user_message, reply, now, llm):
         if memory_id in known_ids:
             store.delete_memory(uid, memory_id)
             changes["removed"].append({"id": memory_id, "text": known_ids[memory_id]["text"]})
-    if any(changes.values()):
-        log("INFO", "기억 정리", added=len(changes["added"]), updated=len(changes["updated"]), removed=len(changes["removed"]))
+    counts = {key: len(items) for key, items in changes.items()}
+    if any(counts.values()):
+        log("INFO", "기억 정리", **counts)
+    gen.end(metadata=counts)
     return changes
 
 
-def maybe_summarize(store, uid, llm):
+def maybe_summarize(store, uid, llm, trace=None):
     """요약되지 않은 메시지가 많으면 앞쪽을 요약에 합친다. 요약했으면 True."""
     summary = store.get_summary(uid)
     pending = store.messages_after(uid, summary["covers_until"] if summary else 0)
@@ -151,11 +157,15 @@ def maybe_summarize(store, uid, llm):
     batch = pending[:SUMMARIZE_BATCH]
     talk = "\n".join(f"{m['role']}: {m['content']}" for m in batch)
     previous = f"[기존 요약]\n{summary['text']}\n\n" if summary else ""
+    gen = (trace or tracing.Observation()).child("memory-summary", "generation", model=getattr(llm, "model", None),
+                                                 metadata={"covered": len(batch)})
     if getattr(llm, "can_reason", False):
-        text = llm.complete_text([{"role": "system", "content": SUMMARY_PROMPT},
-                                  {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
+        text = gen.run(llm.complete_text, [{"role": "system", "content": SUMMARY_PROMPT},
+                                           {"role": "user", "content": f"{previous}[대화]\n{talk}"}])
     else:
         text = ((summary["text"] + " ") if summary else "") + f"메시지 {len(batch)}개를 주고받았다."
+        gen.update(input=talk, output=text)
+    gen.end()
     store.save_summary(uid, text[:2000], batch[-1]["id"])
     log("INFO", "대화 요약 갱신", covered=len(batch))
     return True
