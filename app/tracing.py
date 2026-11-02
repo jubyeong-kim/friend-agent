@@ -10,9 +10,14 @@
 입력과 출력 원문은 Langfuse 로 보내되, 보내기 전에 전화번호, 이메일, 카드 번호를 가린다.
 길찾기(get_route) 결과는 카카오 API 결과라 저장하면 안 된다. hide() 로 등록한 글은 같은 트레이스 안에서 모두 가린다.
 서버 로그에는 지금처럼 원문을 남기지 않는다.
+
+Langfuse 에 닿지 못할 때 요청이 오래 멈추지 않게 한다. 전송 시간 제한은 기본 2초(LANGFUSE_TIMEOUT 으로 바꿈),
+점수 보내기는 요청이 SCORE_FLUSH_WAIT 초까지만 기다린다(점수 재시도 3번은 SDK 에 고정이라 시간 제한만으론 7초쯤 멈춘다).
 """
 import os
 import re
+import threading
+import time
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
@@ -23,14 +28,17 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PHONE = re.compile(r"(?<!\d)(?:\+82[- ]?|0)(?:1[016789]|[2-6]\d?)[- .]?\d{3,4}[- .]?\d{4}(?!\d)")
 ROUTE_HIDDEN = "[길찾기 결과 가림]"
 SAFETY_TAG = "safety"  # 안전 응답을 보낸 트레이스의 tag
+TIMEOUT = 2              # Langfuse 전송 시간 제한(초). SDK 기본은 5초
+SCORE_FLUSH_WAIT = 1.0   # 점수를 보낼 때 요청이 기다리는 최대 시간(초)
 
 _client = None
+_export_log = False      # 임시 진단(LANGFUSE_EXPORT_LOG=true): 내보낸 결과를 로그로
 _generation = ContextVar("langfuse_generation", default=None)  # LLM 클래스가 기록할 generation
 
 
 def setup():
     """앱이 시작할 때 한 번. 키가 없으면 계측을 끄고 앱은 그대로 돈다."""
-    global _client
+    global _client, _export_log
     public = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
     secret = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
     if not (public and secret):
@@ -40,8 +48,66 @@ def setup():
     from langfuse import Langfuse
 
     _client = Langfuse(public_key=public, secret_key=secret,
-                       base_url=os.environ.get("LANGFUSE_BASE_URL", "").strip() or None)
+                       base_url=os.environ.get("LANGFUSE_BASE_URL", "").strip() or None,
+                       timeout=int(os.environ.get("LANGFUSE_TIMEOUT", "").strip() or TIMEOUT))
     log("INFO", "Langfuse 계측 켜짐")  # 키 값은 남기지 않는다
+    if os.environ.get("LANGFUSE_EXPORT_LOG", "").strip().lower() == "true":
+        _export_log = _log_exports(_client)
+
+
+class _ExportLog:
+    """임시 진단. SDK 전송기 앞에 끼워, 내보낸 span 개수 · 트레이스 ID 앞 8자 · 결과 · 걸린 시간만 남긴다(원문 없음)."""
+
+    def __init__(self, exporter):
+        self.exporter = exporter
+
+    def export(self, spans):
+        start = time.perf_counter()
+        fields = {"spans": len(spans), "traces": sorted({f"{s.context.trace_id:032x}"[:8] for s in spans})}
+        try:
+            result = self.exporter.export(spans)
+        except Exception as error:
+            log("WARNING", "Langfuse 내보내기 오류", **fields, error=type(error).__name__)
+            raise
+        name = getattr(result, "name", str(result))
+        log("INFO" if name == "SUCCESS" else "WARNING", "Langfuse 내보내기", **fields, result=name,
+            ms=round((time.perf_counter() - start) * 1000))
+        return result
+
+    def __getattr__(self, name):  # shutdown, force_flush 같은 나머지는 그대로 넘긴다
+        return getattr(self.exporter, name)
+
+
+def _log_exports(client):
+    """SDK 내부(tracer provider 의 배치 처리기)에 기대는 임시 코드라, 점검이 끝나면 지운다. 켜졌으면 True."""
+    try:
+        for processor in client._resources.tracer_provider._active_span_processor._span_processors:
+            batch = getattr(processor, "_batch_processor", None)
+            if batch is not None and not isinstance(batch._exporter, _ExportLog):
+                batch._exporter = _ExportLog(batch._exporter)
+                log("INFO", "Langfuse 내보내기 로그 켜짐")
+                return True
+    except Exception as error:
+        log("WARNING", "Langfuse 내보내기 로그 못 켬", error=type(error).__name__)
+    return False
+
+
+def _flush_within(seconds):
+    """flush 를 따로 돌리고 요청은 seconds 초까지만 기다린다. 넘으면 나머지는 응답 뒤에 이어서 보낸다
+    (Cloud Run 은 응답 뒤 CPU 가 거의 없어서, 그때 보내는 것은 늦거나 빠질 수 있다)."""
+    done = threading.Event()
+
+    def run():
+        try:
+            _client.flush()
+        except Exception as error:
+            log("WARNING", "Langfuse 전송 실패", error=type(error).__name__)
+        finally:
+            done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    if not done.wait(seconds):
+        log("WARNING", "Langfuse 전송 기다림 넘김", seconds=seconds)
 
 
 def scrub(value, hidden=()):
@@ -186,10 +252,13 @@ def finish(root, **fields):
     """트레이스를 끝내고 보낸다. Cloud Run 은 응답이 끝나면 CPU 가 거의 없어서, 요청 안에서 보낸다."""
     root.end(**fields)
     if _client is not None and root.span is not None:
+        start = time.perf_counter()
         try:
             _client.flush()
         except Exception as error:
             log("WARNING", "Langfuse 전송 실패", error=type(error).__name__)
+        if _export_log:
+            log("INFO", "Langfuse flush", trace=(root.trace_id or "")[:8], ms=round((time.perf_counter() - start) * 1000))
 
 
 def link(obs):
@@ -210,7 +279,7 @@ def score(trace_id, name, value, comment=None, timestamp=None):
                              score_id=f"{trace_id}-{name}", timestamp=timestamp,
                              comment=scrub(comment) if comment else None,
                              environment=deployment()["environment"])
-        _client.flush()  # Cloud Run 은 응답이 끝나면 CPU 가 거의 없어서, 요청 안에서 보낸다
+        _flush_within(SCORE_FLUSH_WAIT)  # 요청 안에서 보내되, 버튼 응답이 오래 멈추지 않게 기다림에 상한을 둔다
         return True
     except Exception as error:
         log("WARNING", "Langfuse 점수 전송 실패", error=type(error).__name__)
