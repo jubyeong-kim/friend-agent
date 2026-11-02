@@ -30,6 +30,28 @@ def test_score_waits_at_most_score_flush_wait(monkeypatch):
     assert len(slow.scores) == 1
 
 
+def test_trace_is_recorded_even_if_request_says_not_sampled(monkeypatch):
+    """Cloud Run 앞단이 '표본 아님'(traceparent 끝 -00)으로 보낸 요청에서도 chat-turn 이 기록된다.
+    FastAPI 내장 추적이 켜져 있으면 그 결정을 부모로 물려받아 트레이스가 통째로 빠졌다."""
+    from fastapi.testclient import TestClient
+    from langfuse import Langfuse
+
+    from app.main import app
+
+    monkeypatch.setattr(tracing, "_client", Langfuse(public_key="pk-lf-test", secret_key="sk-lf-test",
+                                                     base_url="http://127.0.0.1:9", timeout=1))  # 닿지 않는 주소
+    roots = []
+    real_trace = tracing.trace
+    monkeypatch.setattr(tracing, "trace", lambda *a, **k: roots.append(real_trace(*a, **k)) or roots[-1])
+    incoming = "00-" + "1" * 32 + "-" + "2" * 16 + "-00"
+    with TestClient(app).stream("POST", "/api/chat", json={"message": "안녕"}, headers={"traceparent": incoming}) as r:
+        for _ in r.iter_lines():
+            pass
+    ctx = roots[0].span._otel_span.get_span_context()
+    assert ctx.trace_flags.sampled
+    assert ctx.trace_id != int("1" * 32, 16)  # 들어온 traceparent 를 부모로 삼지 않았다
+
+
 class FakeExporter:
     def export(self, spans):
         return SimpleNamespace(name="SUCCESS")
