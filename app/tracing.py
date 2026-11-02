@@ -84,6 +84,11 @@ class Observation:
         self.hidden = hidden if hidden is not None else set()  # 같은 트레이스 안에서 함께 쓴다
         self.attrs = attrs if attrs is not None else {}        # 같은 트레이스 안에서 함께 쓴다
 
+    @property
+    def trace_id(self):
+        """이 관찰이 속한 트레이스 ID. 계측이 꺼져 있으면 None. 답 메시지 meta 에 넣어 점수와 잇는다."""
+        return getattr(self.span, "trace_id", None)
+
     def _safe(self, action):
         if self.span is None:
             return None
@@ -185,6 +190,31 @@ def finish(root, **fields):
             _client.flush()
         except Exception as error:
             log("WARNING", "Langfuse 전송 실패", error=type(error).__name__)
+
+
+def link(obs):
+    """답 메시지 meta 에 더할 트레이스 ID. 계측이 꺼져 있으면 빈 dict(meta 가 지금과 같다)."""
+    return {"trace_id": obs.trace_id} if obs.trace_id else {}
+
+
+def score(trace_id, name, value, comment=None, timestamp=None):
+    """트레이스에 BOOLEAN 점수(1/0)를 남긴다. 보냈으면 True. 키나 트레이스 ID 가 없으면 건너뛴다.
+
+    같은 답에 다시 누르면 덮어쓴다. Langfuse 는 id, name, timestamp 의 날짜가 모두 같을 때만 덮어쓰므로
+    score_id 를 '{trace_id}-{name}' 으로, timestamp 를 답 메시지의 저장 시각으로 고정한다.
+    """
+    if _client is None or not trace_id:
+        return False
+    try:
+        _client.create_score(name=name, value=float(value), data_type="BOOLEAN", trace_id=trace_id,
+                             score_id=f"{trace_id}-{name}", timestamp=timestamp,
+                             comment=scrub(comment) if comment else None,
+                             environment=deployment()["environment"])
+        _client.flush()  # Cloud Run 은 응답이 끝나면 CPU 가 거의 없어서, 요청 안에서 보낸다
+        return True
+    except Exception as error:
+        log("WARNING", "Langfuse 점수 전송 실패", error=type(error).__name__)
+        return False
 
 
 def record_llm(model, input, output, input_tokens=None, output_tokens=None):
