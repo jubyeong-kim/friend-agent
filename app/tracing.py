@@ -78,18 +78,53 @@ class _ExportLog:
         return getattr(self.exporter, name)
 
 
+_batch = None   # 임시 진단: 감싼 배치 처리기(대기열 길이를 본다)
+_seen = {}      # 임시 진단: 트레이스 ID 앞 8자 → [처리기에 끝난 span 이 도착한 수, 대기열에 넣은 수]
+_seen_lock = threading.Lock()
+
+
+def _count(span, slot):
+    key = f"{span.context.trace_id:032x}"[:8]
+    with _seen_lock:
+        _seen.setdefault(key, [0, 0])[slot] += 1
+
+
 def _log_exports(client):
-    """SDK 내부(tracer provider 의 배치 처리기)에 기대는 임시 코드라, 점검이 끝나면 지운다. 켜졌으면 True."""
+    """SDK 내부(tracer provider 의 배치 처리기)에 기대는 임시 코드라, 점검이 끝나면 지운다. 켜졌으면 True.
+    내보내기 결과와 함께, span 이 처리기에 도착했는지(on_end) · 대기열에 들어갔는지(emit)를 센다."""
+    global _batch
     try:
         for processor in client._resources.tracer_provider._active_span_processor._span_processors:
             batch = getattr(processor, "_batch_processor", None)
             if batch is not None and not isinstance(batch._exporter, _ExportLog):
                 batch._exporter = _ExportLog(batch._exporter)
+                on_end, emit = processor.on_end, batch.emit
+                processor.on_end = lambda span, _f=on_end: (_count(span, 0), _f(span))[1]
+                batch.emit = lambda span, _f=emit: (_count(span, 1), _f(span))[1]
+                _batch = batch
                 log("INFO", "Langfuse 내보내기 로그 켜짐")
                 return True
     except Exception as error:
         log("WARNING", "Langfuse 내보내기 로그 못 켬", error=type(error).__name__)
     return False
+
+
+def _log_start(span):
+    """임시 진단: 트레이스를 만든 순간 span 이 기록되는지 · 표본에 들었는지, 그때 이미 '현재 span'이 있었는지."""
+    try:
+        from opentelemetry import trace as otel_trace
+
+        otel = span._otel_span
+        ctx = otel.get_span_context()
+        current = otel_trace.get_current_span().get_span_context()
+        parent = getattr(otel, "parent", None)
+        log("INFO", "Langfuse 트레이스 시작", trace=f"{ctx.trace_id:032x}"[:8], recording=otel.is_recording(),
+            sampled=ctx.trace_flags.sampled, has_parent=parent is not None,
+            parent_remote=getattr(parent, "is_remote", None), current_valid=current.is_valid,
+            current_sampled=current.trace_flags.sampled if current.is_valid else None,
+            queue=len(_batch._queue) if _batch is not None else None)
+    except Exception as error:
+        log("WARNING", "Langfuse 진단 실패", error=type(error).__name__)
 
 
 def _flush_within(seconds):
@@ -240,6 +275,8 @@ def trace(name, as_type="span", user_id=None, session_id=None, tags=(), trace_me
     except Exception as error:
         log("WARNING", "Langfuse 기록 실패", error=type(error).__name__)
         span = None
+    if _export_log and span is not None:
+        _log_start(span)
     return Observation(span, attrs=attrs)
 
 
@@ -252,13 +289,19 @@ def finish(root, **fields):
     """트레이스를 끝내고 보낸다. Cloud Run 은 응답이 끝나면 CPU 가 거의 없어서, 요청 안에서 보낸다."""
     root.end(**fields)
     if _client is not None and root.span is not None:
+        trace8 = (root.trace_id or "")[:8]
+        if _export_log:
+            with _seen_lock:
+                on_end, queued = _seen.pop(trace8, [0, 0])
+            queue = len(_batch._queue) if _batch is not None else None
         start = time.perf_counter()
         try:
             _client.flush()
         except Exception as error:
             log("WARNING", "Langfuse 전송 실패", error=type(error).__name__)
         if _export_log:
-            log("INFO", "Langfuse flush", trace=(root.trace_id or "")[:8], ms=round((time.perf_counter() - start) * 1000))
+            log("INFO", "Langfuse flush", trace=trace8, ms=round((time.perf_counter() - start) * 1000),
+                on_end=on_end, queued=queued, queue_before=queue)
 
 
 def link(obs):
