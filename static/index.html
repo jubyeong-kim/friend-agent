@@ -121,6 +121,9 @@ body.has-banner .app{height:calc(100dvh - 32px)}
 .note.cold{background:var(--surface-3);color:var(--ink-2)}
 .report{font-size:12px;color:var(--ink-3);background:none;border:0;padding:2px 4px;visibility:hidden}
 .row.them:hover .report,.report:focus-visible{visibility:visible}
+.fb{font-size:13px;color:var(--ink-3);background:none;border:0;border-radius:6px;padding:2px 4px;visibility:hidden;filter:grayscale(1);opacity:.7}
+.row.them:hover .fb,.fb:focus-visible,.fb.on{visibility:visible}
+.fb.on{filter:none;opacity:1;background:var(--accent-soft)}
 .day{align-self:center;font-size:12px;color:var(--ink-3);padding:2px 0}
 .restart{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.55;color:var(--ink-2);background:var(--surface-2);border:1px dashed #c6cee4;border-radius:var(--r-sm);padding:10px 14px}
 .restart .tag{flex:none;font-size:11px;font-weight:800;padding:1px 7px;border-radius:6px;background:#e2e8ff;color:var(--accent);margin-top:2px}
@@ -593,12 +596,27 @@ function addRow(role, text, opts = {}) {
 function bindReport(row, id) {
   let btn = row.querySelector(".report");
   if (!btn) { btn = document.createElement("button"); btn.className = "report"; btn.textContent = "신고"; row.appendChild(btn); }
+  bindFeedback(row, btn, id);
   btn.onclick = async () => {
     const reason = prompt("어떤 점이 부적절했나요? (선택)") ?? null;
     if (reason === null) return;
     await api("/api/report", {method: "POST", body: JSON.stringify({message_id: id, reason})});
     btn.textContent = "신고됨"; btn.disabled = true;
   };
+}
+// 좋아요, 별로예요. 다시 누르면 서버가 같은 점수를 덮어쓴다(다시 열면 빈 상태로 보인다)
+function bindFeedback(row, before, id) {
+  if (row.querySelector(".fb")) return;
+  for (const [value, icon, label] of [["up", "👍", "좋아요"], ["down", "👎", "별로예요"]]) {
+    const b = document.createElement("button");
+    b.className = "fb"; b.textContent = icon; b.title = label;
+    b.setAttribute("aria-label", label); b.setAttribute("aria-pressed", "false");
+    b.onclick = async () => {
+      await api("/api/feedback", {method: "POST", body: JSON.stringify({message_id: id, value})});
+      for (const x of row.querySelectorAll(".fb")) { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", String(x === b)); }
+    };
+    row.insertBefore(b, before);
+  }
 }
 function note(under, cls, text) {
   const n = document.createElement("span");
