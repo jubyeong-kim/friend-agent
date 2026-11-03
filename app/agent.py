@@ -18,7 +18,7 @@ from app import memory, tracing, when
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, build_persona
 from app.router import MAX_REMINDERS, choose
-from app.safety import CRISIS_REPLY, is_crisis
+from app.safety import CRISIS_REPLY, has_risk_hint, is_crisis
 from app.tools import TOOLS, Context, run_tool
 
 GREETING_GAP = timedelta(hours=6)  # 마지막 대화 뒤 이만큼 지나면 앱을 열 때 먼저 말을 건다
@@ -49,7 +49,8 @@ def reminder_facts(results, dropped):
     return lines
 
 
-def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False, upcoming=(), facts=()):
+def system_prompt(character, now, location, memories, summary, tool_lines=(), clarify=False, upcoming=(), facts=(),
+                  caution=False):
     parts = [build_persona(character),
              f"[지금] {when.label(now)} ({now.tzinfo}), 사용자 지역: {location}\n[달력]\n{when.calendar_hint(now)}"]
     block = memory.memory_block(memories, summary)
@@ -65,6 +66,9 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
                      "이유가 지난 시각이면 이미 지난 일정이라고 말한다. 저장한 약속은 위에 적힌 날짜와 시각 그대로 말한다.")
     if clarify:
         parts.append("[되묻기]\n사용자가 무엇을 원하는지 확실하지 않다. 짧게 되물어서 확인한다.")
+    if caution:
+        parts.append("[조심]\n사용자의 말에 스스로를 해칠 수 있다는 신호가 있을 수 있다. 숙제나 일처럼 일상 이야기가 분명하면 평소처럼 답한다. "
+                     "그렇지 않으면 가볍게 넘기지 말고 걱정을 전하고, 자살예방상담전화 109(24시간)에 이야기할 수 있다고 알려 준다.")
     return "\n\n".join(parts)
 
 
@@ -95,10 +99,11 @@ def turn_events(message, uid, llm, store, show_panel, turn):
 
     # ① 위기 표현
     crisis = is_crisis(message)
+    caution = not crisis and has_risk_hint(message)  # 위기 표현은 아니지만 일상 말인지 모델이 맥락으로 가려야 하는 표현
     if crisis:  # safety 관찰부터 안전 응답 tag 가 붙게 먼저 붙인다
         turn.tag([tracing.SAFETY_TAG], {"tools": [], "safety": True})
     safety = turn.child("safety", input=message)
-    safety.end(output={"crisis": crisis})
+    safety.end(output={"crisis": crisis, "caution": caution})
     if crisis:
         guards = ["위기 표현이 있어 캐릭터 설정과 상관없이 정해진 안전 응답을 보냈습니다."]
         if show_panel:
@@ -115,6 +120,8 @@ def turn_events(message, uid, llm, store, show_panel, turn):
     # ② 도구 선택. 모델이 골랐으면 출력은 모델 응답 원문, 규칙이 골랐으면 고른 도구다
     gen = turn.child("choose-tools", "generation", model=model_name, input=message)
     choice = gen.run(choose, message, history, now, settings["location"], llm)
+    if caution:
+        choice.guards.append("스스로를 해칠 수 있다는 신호일 수 있는 표현이 있어 답 만들기에 [조심] 메모를 붙였습니다.")
     gen.end(output=choice.tools if choice.decided_by == "rule" else None,
             metadata={"tools": choice.tools, "confidence": choice.confidence, "decided_by": choice.decided_by,
                       "action": choice.action, "guards": choice.guards, "dropped": choice.dropped})
@@ -151,7 +158,7 @@ def turn_events(message, uid, llm, store, show_panel, turn):
     upcoming = upcoming_reminders(store, uid, now)
     system = system_prompt(character, now, settings["location"], memories, summary,
                            [r.summary for r in results], clarify=choice.action == "clarify", upcoming=upcoming,
-                           facts=reminder_facts(results, choice.dropped))
+                           facts=reminder_facts(results, choice.dropped), caution=caution)
     if show_panel:
         yield {"type": "context", "memories": [m["text"] for m in memories], "upcoming": upcoming,
                "summary": summary["text"] if summary else None, "recent_messages": len(history)}

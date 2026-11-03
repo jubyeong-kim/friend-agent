@@ -38,7 +38,7 @@ RULES = [
     (re.compile(r"(고양이|강아지|반려견|반려묘|동생|언니|오빠|형|누나)\s*이름은\s*([가-힣A-Za-z]{1,10}?)(?:이야|야|예요|이에요|입니다)?(?=[\s.,!~]|$)"), "fact", "{0} 이름은 {1}"),
     (re.compile(r"((?:오늘|내일|모레|[월화수목금토일]요일)[에는]*\s*(?:\d{1,2}\s*시\s*(?:반|\d{1,2}\s*분)?에?\s*)?[가-힣 ]{1,15}(?:시험|면접|발표|여행|약속))"), "event", "{0}"),
 ]
-DAY_WORD = re.compile(r"(다음\s*주\s*)?(오늘|내일|모레|글피|[월화수목금토일]요일)[에는]*\s*")
+DAY_WORD = re.compile(r"(다음\s*주\s*)?(오늘|내일\s*모레|내일|모레|글피|[월화수목금토일]요일)[에는]*\s*")
 CLOCK = re.compile(r"\d{1,2}\s*시\s*(?:반|\d{1,2}\s*분)?에?\s*")
 
 
@@ -86,7 +86,8 @@ def memory_block(memories, summary):
 def event_text(found, now):
     """'내일 6시에 면접' → '10월 22일(목) 18:00 면접'. 모델이 하는 일(날짜를 실제 날짜로)을 규칙으로 흉내 낸다."""
     day = (now + timedelta(days=when.day_offset(found, now) or 0)).date()
-    clock = when.parse_when(found, now).strftime("%H:%M ") if CLOCK.search(found) else ""
+    t = when.parse_when(found, now) if CLOCK.search(found) else None  # '3시 70분'처럼 없는 시각이면 None
+    clock = t.strftime("%H:%M ") if t else ""
     rest = CLOCK.sub("", DAY_WORD.sub("", found, count=1), count=1).strip()
     return f"{when.date_label(day)} {clock}{rest}"
 
