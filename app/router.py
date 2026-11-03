@@ -134,10 +134,17 @@ def route_clocks(message, now):
     return found
 
 
+def cancel_pick(message):
+    """약속 취소를 부탁하는 말이면 cancel_reminder 선택 하나, 아니면 None."""
+    if any(w in message for w in CANCEL_WORDS) and re.search(r"약속|알림|리마인드", message):
+        return {"name": "cancel_reminder", "args": {"query": reminder_text(message.replace("취소", ""))}}
+    return None
+
+
 def rule_choose(message, now, location):
     picked = []
-    if any(w in message for w in CANCEL_WORDS) and re.search(r"약속|알림|리마인드", message):
-        picked.append({"name": "cancel_reminder", "args": {"query": reminder_text(message.replace("취소", ""))}})
+    if cancel := cancel_pick(message):
+        picked.append(cancel)
     elif LIST_PATTERN.search(message):
         picked.append({"name": "list_reminders", "args": {}})
     elif ASK_PATTERN.search(message) and (due := when.parse_when(message, now)):
@@ -297,6 +304,13 @@ def choose(message, history, now, location, llm):
             result.guards.append("모델 응답을 읽지 못해 키워드 규칙으로 골랐습니다.")
     else:
         result = rule_choose(message, now, location)
+
+    # 안전장치: 약속 취소를 부탁하는 말인데 모델이 아무 도구도 고르지 않으면 규칙으로 취소 도구를 고른다.
+    # 실습에서 '회의 약속 취소해 줘'에 모델이 도구 없이 '그런 기능이 없어'라고 답했다. 맞는 약속이 없으면 도구가 못 찾았다고 알려 준다.
+    if not result.tools and (cancel := cancel_pick(message)):
+        result.tools = [cancel]
+        result.confidence = max(result.confidence, CONFIDENCE_THRESHOLD)
+        result.guards.append("약속 취소를 부탁하는 말이라 규칙으로 약속 취소를 골랐습니다.")
 
     # 안전장치: 약속을 묻는 말인데 모델이 아무 도구도 못 골라 되묻게 될 때는, 되묻는 대신 약속 목록을 본다.
     # 되물으면 저장된 약속이 있어도 "모른다"고 답하게 된다(실습에서 확신도 0.00 으로 확인).
