@@ -8,8 +8,10 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 WEEKDAYS = "월화수목금토일"
-DAY_WORDS = {"오늘": 0, "내일": 1, "모레": 2, "글피": 3}
+# 위에서부터 찾는다. '내일모레'를 '내일'보다 먼저 봐야 한다
+DAY_WORDS = [(r"내일\s*모레", 2), ("그저께", -2), ("어제", -1), ("오늘", 0), ("내일", 1), ("모레", 2), ("글피", 3)]
 PARTS = {"새벽": 5, "아침": 8, "오전": 9, "점심": 12, "오후": 15, "저녁": 19, "밤": 21}
+WAKE = re.compile(r"일어나|깨워|기상")  # 시간대 말이 없어도 아침으로 읽는다("7시에 깨워 줘")
 
 
 def now_in(tz):
@@ -37,9 +39,9 @@ def calendar_hint(now, days=14):
 
 
 def day_offset(text, now):
-    """오늘/내일/모레/요일 표현을 오늘로부터 며칠 뒤인지로 바꾼다. 없으면 None."""
-    for word, offset in DAY_WORDS.items():
-        if word in text:
+    """오늘/내일/모레/요일 표현을 오늘로부터 며칠 뒤인지로 바꾼다('어제'는 -1). 없으면 None."""
+    for word, offset in DAY_WORDS:
+        if re.search(word, text):
             return offset
     m = re.search(r"(다음\s*주\s*)?([월화수목금토일])요일", text)
     if m:
@@ -60,22 +62,30 @@ def parse_when(text, now):
     offset = day_offset(text, now)
     part = next((p for p in PARTS if p in text), None)
     hm = re.search(r"(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분|\s*(반))?", text)
-    if offset is None and part is None and hm is None:
+    end_of_day = "자정" in text  # 그날이 끝나는 0시. 다음 날 00:00 이다
+    if offset is None and part is None and hm is None and not end_of_day:
         return None
 
-    if hm:
+    if end_of_day and not hm:
+        hour, minute = 24, 0
+    elif hm:
         hour = int(hm.group(1))
         minute = int(hm.group(2) or (30 if hm.group(3) else 0))
-        if part in ("오후", "저녁", "밤") and hour < 12:
+        if hour > 24 or minute > 59:
+            return None  # '3시 70분'처럼 없는 시각
+        if part == "밤" and hour == 12:
+            hour = 24  # '밤 12시'는 낮 12시가 아니라 그날 밤이 끝나는 자정
+        elif part == "새벽" and hour == 12:
+            hour = 0
+        elif part in ("오후", "저녁", "밤") and hour < 12:
             hour += 12
-        elif part is None and 1 <= hour <= 7:
-            hour += 12  # "3시"는 보통 오후 3시
+        elif part is None and 1 <= hour <= 7 and not WAKE.search(text):
+            hour += 12  # "3시"는 보통 오후 3시. 일어나기, 깨우기는 아침
     else:
         hour, minute = (PARTS[part], 0) if part else (9, 0)
-    hour %= 24
 
-    base = now + timedelta(days=offset or 0)
-    due = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    base = now + timedelta(days=(offset or 0) + hour // 24)
+    due = base.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
     if offset is None and due <= now:
         due += timedelta(days=1)
     return due

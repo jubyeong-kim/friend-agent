@@ -142,6 +142,9 @@ def rule_choose(message, now, location):
         picked.append({"name": "list_reminders", "args": {}})
     elif ASK_PATTERN.search(message) and (due := when.parse_when(message, now)):
         picked.append({"name": "create_reminder", "args": {"text": reminder_text(message), "due_at": due.isoformat()}})
+    elif ASK_PATTERN.search(message) and re.search(r"\d\s*시", message):
+        # '3시 70분'처럼 시각이 적혀 있는데 읽을 수 없으면 확신도를 낮춰 되묻게 한다
+        return ToolChoice([], 0.3, "알려 줄 시각을 읽지 못했습니다.", "rule")
     elif route := route_args(message, now):
         picked.append({"name": "get_route", "args": route})
     else:
@@ -194,11 +197,14 @@ def model_choose(message, history, now, location, llm):
                 same["args"][key] = value
         result.guards.append(f"{t['name']} 를 두 번 골라 하나로 합쳤습니다.")
     result.tools = merged
+    single_reminder = sum(t["name"] == "create_reminder" for t in result.tools) == 1
     for t in result.tools:
         if t["name"] == "get_route":
             fix_route_clock(t["args"], message, now, result.guards)
         elif t["name"] == "create_reminder":
             keep_written_date(t["args"], message, now, result.guards)
+            if single_reminder:  # 약속이 여럿이면 어느 것이 '밤 12시'인지 모른다
+                fix_midnight(t["args"], message, now, result.guards)
     result.tools, result.dropped = limit_tools(result.tools, result.guards)
     return result
 
@@ -214,6 +220,26 @@ def fix_route_clock(args, message, now, guards):
         if got is None or (abs((got - now).total_seconds()) < 300 and got != datetime.fromisoformat(said)):
             args[key] = said
             guards.append(f"get_route 의 {key} 를 메시지에 나온 시각 {said[11:16]}(으)로 고쳤습니다.")
+
+
+MIDNIGHT = re.compile(r"자정|밤\s*12\s*시")
+
+
+def fix_midnight(args, message, now, guards):
+    """'밤 12시', '자정'은 그날 밤이 끝나는 0시다. 모델이 다른 시각으로 저장하려 하면 규칙으로 읽은 시각으로 고친다.
+
+    실습에서 '밤 12시에 약 먹으라고 알려 줘'를 모델이 오늘 21:00 으로 골랐다(답은 '밤 12시는 이미 지났다'고 지어냄).
+    """
+    if not MIDNIGHT.search(message) or (said := when.parse_when(message, now)) is None:
+        return
+    try:
+        due = datetime.fromisoformat(str(args.get("due_at") or ""))
+    except ValueError:
+        return  # 못 읽는 값은 create_reminder 가 거절한다
+    due = due if due.tzinfo else due.replace(tzinfo=now.tzinfo)
+    if due != said:
+        args["due_at"] = said.isoformat()
+        guards.append(f"create_reminder 의 시각을 메시지의 '밤 12시'(자정)에 맞춰 {when.label(said)}(으)로 고쳤습니다.")
 
 
 def keep_written_date(args, message, now, guards):
