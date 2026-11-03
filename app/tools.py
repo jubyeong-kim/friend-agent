@@ -6,6 +6,7 @@
 각 도구는 모델이 읽을 한 문장 요약(summary)과 화면에 보여 줄 원본(data)을 함께 돌려준다.
 """
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
@@ -299,12 +300,49 @@ def list_reminders(args, ctx):
                       {"reminders": [{"id": r["id"], "text": r["text"], "due_at": r["due_at"].isoformat()} for r in items]})
 
 
+# 어느 약속인지 가리지 못하는 낱말. 규칙은 '회의 약속 해 줘'처럼 취소 문장을 거의 그대로 넘기고, 모델도 문장을 통째로 넘길 때가 있다
+CANCEL_STOPWORDS = {"약속", "알림", "리마인드", "일정", "취소", "취소해", "해", "해줘", "줘", "좀", "그", "그거", "거", "것",
+                    "오늘", "내일", "모레", "글피"}
+
+
+def reminder_words(text):
+    return [w for w in re.findall(r"[가-힣A-Za-z0-9]+", text) if w not in CANCEL_STOPWORDS]
+
+
+def same_word(a, b):
+    """앞 두 글자가 같으면 같은 낱말로 본다('치과를'·'치과', '만나는'·'만나기'). 한 글자 낱말('약')은 '약을'까지."""
+    if min(len(a), len(b)) >= 2:
+        return a[:2] == b[:2]
+    short, longer = sorted((a, b), key=len)
+    return longer.startswith(short) and len(longer) <= 2
+
+
 def cancel_reminder(args, ctx):
+    """찾는 말과 낱말이 가장 많이 겹치는 약속 하나만 취소한다. 겹치는 정도가 같은 약속이 여럿이면 취소하지 않고 되묻게 한다.
+
+    전에는 글자가 통째로 들어 있는지만 봐서, '운동하기 전에 친구 만나는 약속'에 '운동하기'가 취소됐고,
+    약속이 하나뿐이면 '회의 약속'처럼 이름이 달라도 그 약속을 취소했다.
+    """
     query = str(args.get("query") or "").strip()
     items = ctx.store.list_reminders(ctx.user_id, status="pending")
-    match = next((r for r in items if query and (query in r["text"] or r["text"] in query)), None)
-    if not match and len(items) == 1:
-        match = items[0]
+    words = reminder_words(query)
+    scored = sorted(((sum(any(same_word(q, w) for w in reminder_words(r["text"])) for q in words), r) for r in items),
+                    key=lambda pair: -pair[0])
+    exact = [r for r in items if query and r["text"] == query]
+    if exact:
+        match = exact[0]
+    elif not words:  # '그 약속 취소해 줘'처럼 무엇인지 말하지 않았다
+        match = items[0] if len(items) == 1 else None
+        if len(items) > 1:
+            names = ", ".join(f"'{r['text']}'" for r in items[:5])
+            return ToolResult("cancel_reminder", False, f"어느 약속을 취소할지 몰라 취소하지 않았습니다. 저장된 약속: {names}.")
+    else:
+        hits = [(score, r) for score, r in scored if score > 0]
+        if len(hits) > 1 and hits[0][0] == hits[1][0]:
+            names = ", ".join(f"'{r['text']}'" for score, r in hits if score == hits[0][0])
+            return ToolResult("cancel_reminder", False,
+                              f"'{query}'에 맞는 약속이 여럿이라 취소하지 않았습니다: {names}. 어느 것인지 알려 주면 취소할 수 있습니다.")
+        match = hits[0][1] if hits else None
     if not match:
         return ToolResult("cancel_reminder", False, f"'{query}'에 해당하는 약속을 찾지 못했습니다.")
     ctx.store.cancel_reminder(ctx.user_id, match["id"])
