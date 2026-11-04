@@ -4,12 +4,13 @@
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
    메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
+지시문은 Langfuse 프롬프트 router-prompt 의 라벨 버전을 쓰고, 계측이 꺼졌거나 가져오지 못하면 코드의 ROUTER_TEMPLATE 을 쓴다.
 """
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from app import when
+from app import tracing, when
 from app.logs import log
 from app.tools import CITIES, TOOLS
 
@@ -39,34 +40,48 @@ DEPART = re.compile(r"\d{1,2}\s*시(?:\s*\d{1,2}\s*분|\s*반)?\s*(?:에\s*)?(?:
 ARRIVE = re.compile(r"\d{1,2}\s*시(?:\s*\d{1,2}\s*분|\s*반)?\s*까지")
 
 
-def router_prompt():
-    tools = "\n".join(f"- {name}: {t['desc']}. 인자 {t['args']}" for name, t in TOOLS.items())
-    return "\n".join([
-        "너는 AI 친구 서비스에서 사용자 메시지에 답하기 전에 필요한 도구를 고르는 선택기다.",
-        "쓸 수 있는 도구:",
-        tools,
-        "",
-        "규칙:",
-        "- 도구가 필요 없는 일상 대화면 tools 를 빈 배열로 둔다. 대부분의 메시지는 여기에 해당한다.",
-        f"- 꼭 필요한 도구만 고른다. create_reminder 는 약속마다 하나씩 최대 {MAX_REMINDERS}개, 다른 도구는 합쳐서 최대 {MAX_TOOLS}개다. "
-        "묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
-        "- 날씨나 미세먼지 이야기를 해도 예보를 묻는 게 아니라 경험이나 하소연이면 도구를 쓰지 않는다.",
-        "- location 은 메시지에 도시 이름이 있으면 그 도시, 없으면 사용자 지역이다.",
-        "- date 는 [달력]을 보고 정한 YYYY-MM-DD 날짜다. 날짜 표현이 없으면 오늘이다.",
-        "- create_reminder 는 사용자가 나중에 알려 달라고 분명히 부탁할 때만 고른다. 일정이 있다는 이야기만 하면 고르지 않는다.",
-        "- create_reminder 의 text 는 알려 줄 내용만 짧게 쓴다. 예: '우산 챙기기', '일찍 자기'.",
-        "- create_reminder 의 due_at 은 [지금] 시각과 시간대를 기준으로 계산한다. 시각 없이 날짜만 있으면 09:00, 아침 08:00, 점심 12:00, 저녁 19:00, 밤 21:00 으로 한다.",
-        "- 사용자가 자기 약속, 알림, 일정을 묻거나 확인하려 하면 list_reminders 를 고른다. 예: '내일 약속 있어?', '내 약속에 대해 아는 거 있어?'.",
-        "- 어디서 어디까지 얼마나 걸리는지, 몇 시까지 갈 수 있는지 물으면 get_route 를 고른다. 걸리는 시간을 짐작해서 답하지 않게 하기 위해서다.",
-        "- get_route 의 origin, destination 은 말한 역이나 장소 이름을 그대로 쓴다. 예: '낙성대역', '인왕산'. 출발지를 말하지 않았으면 최근 대화에서 찾고, 없으면 빈 문자열로 둔다.",
-        "- get_route 는 한 번만 고른다. 출발 시각과 도착 시각을 둘 다 말했으면 한 호출의 depart_at, arrive_by 에 함께 넣는다.",
-        "- get_route 의 depart_at 은 '6시에 퇴근하고'처럼 출발 시각을 말했을 때만 그 시각으로 쓴다('6시'는 보통 18:00). 말하지 않았으면 비워 둔다(지금 출발로 계산된다). arrive_by 는 '7시까지'처럼 도착해야 할 시각을 말했을 때만 쓴다. 둘 다 [지금] 기준 ISO 시각이다.",
-        "- 다녀온 이야기('어제 인왕산 가는 데 2시간 걸렸어')처럼 지난 경험이면 get_route 를 고르지 않는다.",
-        "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
-        "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다. 도구가 필요 없다고 판단했을 때도 그 판단의 확신을 쓴다(일상 대화면 높게).",
-        "- reason 은 고른 이유를 한국어 한 문장으로 쓴다.",
-        '- 반드시 JSON 하나로만 답한다: {"tools": [{"name": "도구 이름", "args": {인자}}], "confidence": 0과 1 사이 숫자, "reason": "이유"}',
-    ])
+PROMPT_NAME = "router-prompt"  # Langfuse 프롬프트 이름
+
+# 도구 선택 지시문의 코드 원본. Langfuse 의 router-prompt 버전 1은 이 글을 그대로 올린 것이다.
+# {{tools}}, {{max_reminders}}, {{max_tools}} 는 router_prompt 가 채운다.
+ROUTER_TEMPLATE = "\n".join([
+    "너는 AI 친구 서비스에서 사용자 메시지에 답하기 전에 필요한 도구를 고르는 선택기다.",
+    "쓸 수 있는 도구:",
+    "{{tools}}",
+    "",
+    "규칙:",
+    "- 도구가 필요 없는 일상 대화면 tools 를 빈 배열로 둔다. 대부분의 메시지는 여기에 해당한다.",
+    "- 꼭 필요한 도구만 고른다. create_reminder 는 약속마다 하나씩 최대 {{max_reminders}}개, 다른 도구는 합쳐서 최대 {{max_tools}}개다. "
+    "묻지 않은 정보의 도구는 덧붙이지 않는다(날씨만 물으면 get_weather 하나).",
+    "- 날씨나 미세먼지 이야기를 해도 예보를 묻는 게 아니라 경험이나 하소연이면 도구를 쓰지 않는다.",
+    "- location 은 메시지에 도시 이름이 있으면 그 도시, 없으면 사용자 지역이다.",
+    "- date 는 [달력]을 보고 정한 YYYY-MM-DD 날짜다. 날짜 표현이 없으면 오늘이다.",
+    "- create_reminder 는 사용자가 나중에 알려 달라고 분명히 부탁할 때만 고른다. 일정이 있다는 이야기만 하면 고르지 않는다.",
+    "- create_reminder 의 text 는 알려 줄 내용만 짧게 쓴다. 예: '우산 챙기기', '일찍 자기'.",
+    "- create_reminder 의 due_at 은 [지금] 시각과 시간대를 기준으로 계산한다. 시각 없이 날짜만 있으면 09:00, 아침 08:00, 점심 12:00, 저녁 19:00, 밤 21:00 으로 한다.",
+    "- 사용자가 자기 약속, 알림, 일정을 묻거나 확인하려 하면 list_reminders 를 고른다. 예: '내일 약속 있어?', '내 약속에 대해 아는 거 있어?'.",
+    "- 어디서 어디까지 얼마나 걸리는지, 몇 시까지 갈 수 있는지 물으면 get_route 를 고른다. 걸리는 시간을 짐작해서 답하지 않게 하기 위해서다.",
+    "- get_route 의 origin, destination 은 말한 역이나 장소 이름을 그대로 쓴다. 예: '낙성대역', '인왕산'. 출발지를 말하지 않았으면 최근 대화에서 찾고, 없으면 빈 문자열로 둔다.",
+    "- get_route 는 한 번만 고른다. 출발 시각과 도착 시각을 둘 다 말했으면 한 호출의 depart_at, arrive_by 에 함께 넣는다.",
+    "- get_route 의 depart_at 은 '6시에 퇴근하고'처럼 출발 시각을 말했을 때만 그 시각으로 쓴다('6시'는 보통 18:00). 말하지 않았으면 비워 둔다(지금 출발로 계산된다). arrive_by 는 '7시까지'처럼 도착해야 할 시각을 말했을 때만 쓴다. 둘 다 [지금] 기준 ISO 시각이다.",
+    "- 다녀온 이야기('어제 인왕산 가는 데 2시간 걸렸어')처럼 지난 경험이면 get_route 를 고르지 않는다.",
+    "- 최근 대화를 보고 '그럼 모레는?' 같은 이어지는 질문의 도구와 인자를 정한다.",
+    "- confidence 는 고른 결과가 맞을 확신을 0과 1 사이 숫자로 쓴다. 도구가 필요 없다고 판단했을 때도 그 판단의 확신을 쓴다(일상 대화면 높게).",
+    "- reason 은 고른 이유를 한국어 한 문장으로 쓴다.",
+    '- 반드시 JSON 하나로만 답한다: {"tools": [{"name": "도구 이름", "args": {인자}}], "confidence": 0과 1 사이 숫자, "reason": "이유"}',
+])
+
+
+def router_prompt(prompt=None):
+    """도구 선택 지시문. prompt(Langfuse 에서 가져온 버전)가 없으면 코드의 ROUTER_TEMPLATE 을 쓴다."""
+    values = {"tools": "\n".join(f"- {name}: {t['desc']}. 인자 {t['args']}" for name, t in TOOLS.items()),
+              "max_reminders": str(MAX_REMINDERS), "max_tools": str(MAX_TOOLS)}
+    if prompt is not None:
+        return prompt.compile(**values)
+    text = ROUTER_TEMPLATE
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
 
 
 @dataclass
@@ -171,11 +186,13 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
-def model_choose(message, history, now, location, llm):
+def model_choose(message, history, now, location, llm, label=None):
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:]) or "(없음)"
     user = (f"[지금] {now.isoformat()} ({when.WEEKDAYS[now.weekday()]}요일)\n[달력]\n{when.calendar_hint(now)}\n"
             f"[사용자 지역] {location}\n[최근 대화]\n{recent}\n\n[메시지]\n{message}")
-    data = llm.complete_json(router_prompt(), user)
+    prompt = tracing.get_prompt(PROMPT_NAME, label)  # label 은 A/B 의 prod-a · prod-b. 없으면 기본 라벨
+    tracing.link_prompt(prompt)
+    data = llm.complete_json(router_prompt(prompt), user)
     tools = []
     for t in data.get("tools") or []:
         if isinstance(t, dict) and t.get("name") in TOOLS:
@@ -294,10 +311,10 @@ def limit_tools(tools, guards):
     return kept, dropped
 
 
-def choose(message, history, now, location, llm):
+def choose(message, history, now, location, llm, label=None):
     if getattr(llm, "can_reason", False):
         try:
-            result = model_choose(message, history, now, location, llm)
+            result = model_choose(message, history, now, location, llm, label)
         except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
             log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
             result = rule_choose(message, now, location)

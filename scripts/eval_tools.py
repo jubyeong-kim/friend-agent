@@ -3,20 +3,27 @@
 실행:
   python scripts/eval_tools.py            # .env 의 LLM 으로 모델 선택기를 평가 (호출 46번, 비용 발생)
   python scripts/eval_tools.py --rule     # 키워드 규칙 선택기를 평가 (비용 없음)
+  python scripts/eval_tools.py --label staging   # 지시문을 Langfuse router-prompt 의 staging 라벨 버전으로 (호출 46번)
+
+  python scripts/eval_tools.py --min 40   # 도구와 인자 모두 정답이 40개 미만이면 종료 코드 1 (CI 평가 게이트)
+
+--label 이 없으면 코드의 지시문(ROUTER_TEMPLATE)으로 평가한다. 라벨 버전을 가져오지 못하면 평가하지 않고 멈춘다.
 
 정답의 날짜와 시각은 '2026-10-12(월) 14:00 한국 시간'을 지금으로 보고 만들었다. 평가도 그 시각을 지금으로 쓴다.
 """
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app import tracing  # noqa: E402
 from app.config import load_settings  # noqa: E402
 from app.llm import make_llm  # noqa: E402
-from app.router import model_choose, rule_choose  # noqa: E402
+from app.router import PROMPT_NAME, model_choose, rule_choose  # noqa: E402
 
 NOW = datetime.fromisoformat("2026-10-12T14:00:00+09:00")
 LOCATION = "서울"
@@ -47,12 +54,41 @@ def args_match(expected, actual):
     return wrong
 
 
+def holiday_covered(next_holiday, tools):
+    """기간을 말하지 않은 공휴일 질문은 고른 get_holidays 중 하나의 기간에 다음 공휴일이 들어가면 맞다.
+    from, to 를 비우면 도구처럼 오늘부터 365일을 찾는 것으로 본다."""
+    want = date.fromisoformat(next_holiday)
+    ranges = []
+    for t in tools:
+        if t["name"] != "get_holidays":
+            continue
+        try:
+            start = date.fromisoformat(t["args"].get("from") or NOW.date().isoformat())
+            end = date.fromisoformat(t["args"].get("to") or (NOW.date() + timedelta(days=365)).isoformat())
+        except ValueError:
+            start, end = NOW.date(), NOW.date() + timedelta(days=365)
+        if start <= want <= end:
+            return []
+        ranges.append(f"{start}~{end}")
+    return [f"next_holiday: {next_holiday} 이 고른 기간 밖, 결과 {', '.join(ranges) or '기간 없음'}"]
+
+
 def main():
     use_rule = "--rule" in sys.argv
     llm = None if use_rule else make_llm(load_settings())
     if llm is not None and not llm.can_reason:
         print("LLM_PROVIDER=fake 에서는 모델 평가를 할 수 없습니다. --rule 로 실행하세요.")
         return
+    prompt_name = "코드의 지시문"
+    if "--label" in sys.argv and not use_rule:
+        label = sys.argv[sys.argv.index("--label") + 1]
+        os.environ["LANGFUSE_PROMPT_LABEL"] = label
+        tracing.setup()   # 트레이스는 남지 않는다(기록할 generation 이 없다). 프롬프트만 가져온다
+        prompt = tracing.get_prompt(PROMPT_NAME)
+        if prompt is None:
+            print(f"Langfuse 에서 {PROMPT_NAME} 의 {label} 라벨 버전을 가져오지 못했습니다. 평가하지 않습니다.")
+            return
+        prompt_name = f"{PROMPT_NAME} {label} 라벨 = 버전 {prompt.version}"
 
     rows = [json.loads(line) for line in (ROOT / "data/eval/tool_selection.jsonl").read_text(encoding="utf-8").splitlines()]
     tool_ok = args_ok = 0
@@ -71,17 +107,27 @@ def main():
             got = {t["name"]: t["args"] for t in choice.tools}
             for name, expected in row["expected_args"].items():
                 wrong += args_match(expected, got.get(name, {}))
+            if row.get("next_holiday"):
+                wrong += holiday_covered(row["next_holiday"], choice.tools)
             if not wrong:
                 args_ok += 1
         if not tools_right or wrong:
             failures.append((row, sorted(picked), wrong, choice.confidence))
 
     n = len(rows)
-    print(f"[{'키워드 규칙' if use_rule else '모델 ' + llm.model}] 도구 정답 {tool_ok}/{n}, 도구와 인자 모두 정답 {args_ok}/{n}")
+    print(f"[{'키워드 규칙' if use_rule else '모델 ' + llm.model + ' · ' + prompt_name}] "
+          f"도구 정답 {tool_ok}/{n}, 도구와 인자 모두 정답 {args_ok}/{n}")
     for row, picked, wrong, conf in failures:
         detail = "; ".join(wrong) if wrong else f"정답 {row['expected_tools'] or '도구 없음'}, 결과 {picked or '도구 없음'}"
         print(f"  {row['id']} {row['message']}  →  {detail}  (확신도 {conf:.2f})")
+    return args_ok
 
 
 if __name__ == "__main__":
-    main()
+    passed = main()
+    if "--min" in sys.argv:
+        need = int(sys.argv[sys.argv.index("--min") + 1])
+        if passed is None or passed < need:
+            print(f"기준 미달: 도구와 인자 모두 정답이 {need}개 이상이어야 합니다(결과 {passed}).")
+            sys.exit(1)
+        print(f"기준 통과: {passed} ≥ {need}")
