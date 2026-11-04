@@ -5,6 +5,8 @@
   python scripts/eval_tools.py --rule     # 키워드 규칙 선택기를 평가 (비용 없음)
   python scripts/eval_tools.py --label staging   # 지시문을 Langfuse router-prompt 의 staging 라벨 버전으로 (호출 46번)
 
+  python scripts/eval_tools.py --min 40   # 도구와 인자 모두 정답이 40개 미만이면 종료 코드 1 (CI 평가 게이트)
+
 --label 이 없으면 코드의 지시문(ROUTER_TEMPLATE)으로 평가한다. 라벨 버전을 가져오지 못하면 평가하지 않고 멈춘다.
 
 정답의 날짜와 시각은 '2026-10-12(월) 14:00 한국 시간'을 지금으로 보고 만들었다. 평가도 그 시각을 지금으로 쓴다.
@@ -118,7 +120,14 @@ def main():
     for row, picked, wrong, conf in failures:
         detail = "; ".join(wrong) if wrong else f"정답 {row['expected_tools'] or '도구 없음'}, 결과 {picked or '도구 없음'}"
         print(f"  {row['id']} {row['message']}  →  {detail}  (확신도 {conf:.2f})")
+    return args_ok
 
 
 if __name__ == "__main__":
-    main()
+    passed = main()
+    if "--min" in sys.argv:
+        need = int(sys.argv[sys.argv.index("--min") + 1])
+        if passed is None or passed < need:
+            print(f"기준 미달: 도구와 인자 모두 정답이 {need}개 이상이어야 합니다(결과 {passed}).")
+            sys.exit(1)
+        print(f"기준 통과: {passed} ≥ {need}")
