@@ -25,6 +25,7 @@ import re
 import secrets
 import time
 import uuid
+from datetime import timezone
 from typing import Literal
 
 import httpx
@@ -163,11 +164,29 @@ def config():
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
-    # 처음 온 사용자에게 무료 크레딧. 참조가 유일해서 여러 번 불러도 한 번만 쌓인다
-    if not store.add_credit(user.id, SIGNUP_CREDITS, "signup", f"signup:{user.id}")["duplicate"]:
-        log("INFO", "가입 무료 크레딧", amount=SIGNUP_CREDITS)
+    grant_signup_credits(user.id)
     return {"id": user.id, "anonymous": user.anonymous, "email": user.email,
             "has_character": store.get_character(user.id) is not None}
+
+
+def signup_day_start():
+    """하루 상한을 세는 기준: 오늘 한국 날짜 0시를 UTC 로."""
+    return when.now_in("Asia/Seoul").replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+
+def grant_signup_credits(uid):
+    """처음 온 사용자에게 무료 크레딧. 참조가 유일해서 여러 번 불러도 한 번만 쌓인다.
+    오늘(한국 날짜) 무료 크레딧을 받은 사람이 하루 상한(SIGNUP_DAILY_LIMIT)에 닿았으면 주지 않는다.
+    게스트를 계속 새로 만들어 무료 크레딧을 받는 공격의 하루 비용을 묶는다. 이미 받은 사용자는 영향이 없다.
+    한계: 세는 일과 쌓는 일이 따로라, 같은 순간에 여러 명이 오면 상한을 조금 넘을 수 있다."""
+    ref = f"signup:{uid}"
+    if store.credit_ref_exists(ref):
+        return
+    if store.count_signups_since(signup_day_start()) >= settings.signup_daily_limit:
+        log("WARNING", "가입 무료 크레딧 하루 상한에 닿아 주지 않음", limit=settings.signup_daily_limit)
+        return
+    if not store.add_credit(uid, SIGNUP_CREDITS, "signup", ref)["duplicate"]:
+        log("INFO", "가입 무료 크레딧", amount=SIGNUP_CREDITS)
 
 
 @app.get("/api/credits")

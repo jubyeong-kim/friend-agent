@@ -22,6 +22,8 @@ PROVIDERS = {
 
 # 크레딧 숫자는 여기 한곳에서만 정한다. 화면은 계산하지 않고 서버가 준 잔액만 보여 준다.
 SIGNUP_CREDITS = 20       # 처음 온 사용자에게 한 번 주는 무료 크레딧
+SIGNUP_DAILY_LIMIT = 50   # 하루(한국 날짜)에 무료 크레딧을 받는 사람 수 상한. 게스트를 계속 새로 만들어 받는 것을 막는다.
+                          # 하루 최대 비용 = 50 × 20 × 메시지 원가. 시험할 때만 환경변수 SIGNUP_DAILY_LIMIT 로 바꾼다
 CREDITS_PER_MESSAGE = 1   # /api/chat 메시지 하나에 쓰는 크레딧(위기 표현은 차감하지 않는다)
 LOW_CREDITS = 10          # 잔액이 이만큼 이하면 화면이 입력창 위에 「얼마 남지 않았어요」 띠를 보여 준다
 
@@ -54,6 +56,7 @@ class Settings:
     ocr_enabled: bool
     toss_client_key: str = ""   # 화면에 줘도 되는 키(/api/config 로 내려 줌)
     toss_secret_key: str = field(default="", repr=False)   # 서버에서만. 화면, /api/config, 로그에 절대 넣지 않는다(repr 에도 안 나옴)
+    signup_daily_limit: int = SIGNUP_DAILY_LIMIT
 
     @property
     def payments_enabled(self):
@@ -153,9 +156,10 @@ def load_settings():
         ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. tesseract 프로그램이 필요하다
         toss_client_key=toss_client,
         toss_secret_key=toss_secret,
+        signup_daily_limit=max(0, int(os.environ.get("SIGNUP_DAILY_LIMIT", "").strip() or SIGNUP_DAILY_LIMIT)),
     )
     log("INFO", "앱을 시작합니다.", provider=settings.provider, model=settings.model, env=settings.env,
         storage=settings.storage, auth=settings.auth, turn_panel=settings.show_turn_panel,
         route_tool=bool(os.environ.get("KAKAO_REST_KEY", "").strip()),  # 키 값이 아니라 있는지만 남긴다
-        payments=settings.payments_enabled)
+        payments=settings.payments_enabled, signup_daily_limit=settings.signup_daily_limit)
     return settings
