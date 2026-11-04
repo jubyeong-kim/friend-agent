@@ -9,7 +9,8 @@ import pytest
 
 os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory", "AUTH": "none",
                    "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": "",  # 테스트 데이터를 Langfuse 로 보내지 않는다
-                   "TOSS_CLIENT_KEY": "", "TOSS_SECRET_KEY": ""})  # 진짜 토스 승인 클라이언트를 만들지 않는다(결제 테스트는 가짜를 끼운다)
+                   "TOSS_CLIENT_KEY": "", "TOSS_SECRET_KEY": "",  # 진짜 토스 승인 클라이언트를 만들지 않는다(결제 테스트는 가짜를 끼운다)
+                   "SIGNUP_DAILY_LIMIT": "1000000"})  # 테스트는 새 사용자를 많이 만든다. 하루 상한 시험은 test_signup_limit.py 가 따로
 os.environ.setdefault("ENV", "test")
 
 

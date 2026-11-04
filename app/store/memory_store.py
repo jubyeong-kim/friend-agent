@@ -142,6 +142,15 @@ class MemoryStore:
             self.credit_refs.add(reference)
         return {**row, "duplicate": False}
 
+    def credit_ref_exists(self, reference):
+        with self.lock:
+            return reference in self.credit_refs
+
+    def count_signups_since(self, since):
+        """since(UTC 시각) 뒤에 쌓인 가입 무료 크레딧 줄 수. 모든 사용자를 센다(하루 지급 상한용)."""
+        with self.lock:
+            return sum(1 for row in self.ledger if row["reason"] == "signup" and row["created_at"] >= since)
+
     def recent_credits(self, uid, limit):
         """최근 기록부터."""
         with self.lock:

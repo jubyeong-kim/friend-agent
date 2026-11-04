@@ -169,6 +169,17 @@ class SupabaseStore:
         return {"id": row["id"], "delta": row["delta"], "reason": row["reason"], "reference": row["reference"],
                 "created_at": parse_time(row["created_at"])}
 
+    def credit_ref_exists(self, reference):
+        return bool(self._get("credit_ledger", select="id", reference=f"eq.{reference}", limit=1))
+
+    def count_signups_since(self, since):
+        """since(UTC 시각) 뒤에 쌓인 가입 무료 크레딧 줄 수. 모든 사용자를 센다(하루 지급 상한용).
+        행은 받지 않고 개수만 받는다(Prefer: count=exact, 응답 Content-Range 의 / 뒤 숫자)."""
+        r = self.http.get("/credit_ledger", params={"select": "id", "reason": "eq.signup", "created_at": f"gte.{iso(since)}",
+                                                    "limit": 1}, headers={"Prefer": "count=exact"})
+        r.raise_for_status()
+        return int(r.headers.get("content-range", "*/0").split("/")[-1])
+
     def recent_credits(self, uid, limit):
         """최근 기록부터."""
         rows = self._get("credit_ledger", user_id=f"eq.{uid}", order="id.desc", limit=limit)
