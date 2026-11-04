@@ -5,7 +5,7 @@
 ## 1. 프로젝트 준비 (환경마다 한 번)
 
 1. Supabase 대시보드에서 프로젝트를 만든다. 무료 플랜은 활성 프로젝트 2개까지다.
-2. **SQL Editor** 에 `supabase/migrations/0001_init.sql` 내용을 붙여 넣고 실행한다.
+2. **SQL Editor** 에 `supabase/migrations/0001_init.sql` 내용을 붙여 넣고 실행한다. 이어서 `0002_credits.sql`(크레딧 원장)도 같은 방법으로 실행한다.
 3. **Authentication > Sign In / Providers** 에서 **Allow anonymous sign-ins** 를 켠다.
 4. **Authentication > Rate Limits** 에서 익명 로그인 한도를 확인한다. 기본값은 IP 하나당 시간당 30건이다. 같은 와이파이를 쓰는 교실에서는 이 한도에 금방 걸리므로 수업 전에 올린다.
 5. **Project Settings > API Keys** 에서 publishable key 와 secret key 를 확인한다. 키 값은 채팅이나 코드에 붙여 넣지 않는다.

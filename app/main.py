@@ -3,8 +3,10 @@
 화면(/)과 API를 FastAPI 하나가 함께 제공한다.
 - /health, /version: 서비스 상태와 배포 버전
 - /api/config: 화면이 쓰는 설정(로그인 방식, 개발용 패널 표시 여부)
+- /api/me: 로그인한 사용자. 처음 온 사용자에게 가입 무료 크레딧을 한 번 준다
 - /api/character, /api/settings: 캐릭터와 사용자 설정
-- /api/chat: 메시지 한 턴. 결과를 이벤트(JSON 한 줄씩)로 스트리밍한다
+- /api/chat: 메시지 한 턴. 크레딧 1개를 쓰고(위기 표현은 차감하지 않음) 결과를 이벤트(JSON 한 줄씩)로 스트리밍한다
+- /api/credits: 남은 크레딧과 최근 기록
 - /api/greeting: 앱을 열 때 먼저 말 걸기
 - /api/feedback, /api/report: 답에 좋아요·별로예요, 신고. Langfuse 점수로 보낸다(user-feedback, report)
 - /api/ocr: 사진 속 글자 읽기(OCR_ENABLED=true 일 때)
@@ -16,6 +18,7 @@ import html
 import json
 import os
 import time
+import uuid
 from typing import Literal
 
 import httpx
@@ -25,10 +28,11 @@ from pydantic import BaseModel
 
 from app import agent, card, memory, ocr, tracing, when
 from app.auth import Auth, User
-from app.config import ROOT, load_settings
+from app.config import CREDITS_PER_MESSAGE, ROOT, SIGNUP_CREDITS, load_settings
 from app.llm import make_llm
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
+from app.safety import is_crisis
 from app.store.base import make_store
 from app.tools import CITIES, holidays_of
 
@@ -115,8 +119,18 @@ def config():
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
+    # 처음 온 사용자에게 무료 크레딧. 참조가 유일해서 여러 번 불러도 한 번만 쌓인다
+    if not store.add_credit(user.id, SIGNUP_CREDITS, "signup", f"signup:{user.id}")["duplicate"]:
+        log("INFO", "가입 무료 크레딧", amount=SIGNUP_CREDITS)
     return {"id": user.id, "anonymous": user.anonymous, "email": user.email,
             "has_character": store.get_character(user.id) is not None}
+
+
+@app.get("/api/credits")
+def credits(user: User = Depends(current_user)):
+    return {"balance": store.credit_balance(user.id),
+            "recent": [{"delta": c["delta"], "reason": c["reason"], "created_at": c["created_at"].isoformat()}
+                       for c in store.recent_credits(user.id, 10)]}
 
 
 # ── 캐릭터와 설정 ──────────────────────────────────────────────────
@@ -169,21 +183,48 @@ def messages(user: User = Depends(current_user)):
             for i, m in enumerate(items)]
 
 
+NO_CREDITS_MESSAGE = "크레딧을 다 썼어요. 충전하면 바로 이어서 이야기할 수 있어요."
+
+
+def chat_lines(message, uid, model, charge_ref):
+    """한 턴의 이벤트를 JSON 한 줄씩 내보낸다. charge_ref 는 이번 메시지에 쓴 크레딧의 무작위 값(차감 안 했으면 None).
+
+    답을 만들다 오류가 나면 쓴 크레딧을 되돌린다. 사용자가 창을 닫아 연결이 끊기면 제너레이터가
+    GeneratorExit 으로 닫히는데, 이건 Exception 이 아니라 아래 except 에 걸리지 않으므로 되돌리지 않는다.
+    """
+    try:
+        for event in agent.run_turn(message, uid, model, store, settings.show_turn_panel):
+            yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
+    except Exception as error:
+        log("ERROR", "대화 처리 실패", error=type(error).__name__)
+        if charge_ref:
+            try:
+                store.add_credit(uid, CREDITS_PER_MESSAGE, "refund", f"refund:chat:{charge_ref}")
+                log("WARNING", "크레딧 되돌림", amount=CREDITS_PER_MESSAGE)
+            except Exception as refund_error:
+                log("ERROR", "크레딧 되돌림 실패", error=type(refund_error).__name__)
+        yield json.dumps({"type": "error", "message": "답을 만들지 못했어요. 잠시 뒤 다시 보내 주세요."}, ensure_ascii=False) + "\n"
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest, user: User = Depends(current_user), model=Depends(get_llm)):
     message = req.message.strip()[:1000]
     if not message:
         raise HTTPException(400, "메시지가 비어 있습니다")
 
-    def events():
-        try:
-            for event in agent.run_turn(message, user.id, model, store, settings.show_turn_panel):
-                yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
-        except Exception as error:
-            log("ERROR", "대화 처리 실패", error=type(error).__name__)
-            yield json.dumps({"type": "error", "message": "답을 만들지 못했어요. 잠시 뒤 다시 보내 주세요."}, ensure_ascii=False) + "\n"
+    # 스트림을 열기 전에 차감한다(사용자 메시지는 스트림 안에서 저장되므로, 402 면 아무것도 저장되지 않는다).
+    # 위기 표현은 차감도 거절도 하지 않는다. 잔액이 없어도 안전 응답이 나가야 하기 때문이다(판단은 agent 와 같은 함수).
+    charge_ref = None
+    if not is_crisis(message):
+        charge_ref = uuid.uuid4().hex
+        spent = store.spend_credit(user.id, CREDITS_PER_MESSAGE, "chat", f"chat:{charge_ref}")
+        if not spent["ok"]:
+            log("INFO", "크레딧 부족")
+            # HTTPException 은 본문을 detail 로 감싸서, 정해진 본문 그대로 보내려고 JSONResponse 를 돌려준다
+            return JSONResponse({"error": "insufficient_credits", "message": NO_CREDITS_MESSAGE,
+                                 "balance": spent["balance"]}, status_code=402)
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    return StreamingResponse(chat_lines(message, user.id, model, charge_ref), media_type="application/x-ndjson")
 
 
 @app.post("/api/greeting")

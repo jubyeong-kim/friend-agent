@@ -143,6 +143,44 @@ class SupabaseStore:
                             user_id=f"eq.{uid}", status="eq.pending", due_at=f"lte.{iso(now)}")
         return [self._reminder(r) for r in rows]
 
+    # 크레딧 원장. 잔액 계산과 차감은 DB 함수(supabase/migrations/0002_credits.sql)가 한다.
+    # 두 함수는 anon, authenticated 역할에서 실행 권한을 회수했고 service_role(secret key)만 부를 수 있다.
+    def _rpc(self, name, **args):
+        r = self.http.post(f"/rpc/{name}", json=args)
+        r.raise_for_status()
+        return r.json()
+
+    def credit_balance(self, uid):
+        return int(self._rpc("credit_balance", p_user_id=uid))
+
+    def add_credit(self, uid, delta, reason, reference):
+        """참조(reference)가 이미 있으면 쌓지 않고 duplicate=True 를 돌려준다.
+        ON CONFLICT DO NOTHING 이라 무시된 행은 응답에 없다(빈 배열)."""
+        r = self.http.post("/credit_ledger", params={"on_conflict": "reference"},
+                           json={"user_id": uid, "delta": delta, "reason": reason, "reference": reference},
+                           headers={"Prefer": "return=representation,resolution=ignore-duplicates"})
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            return {"duplicate": True}
+        return {**self._credit(rows[0]), "duplicate": False}
+
+    def _credit(self, row):
+        return {"id": row["id"], "delta": row["delta"], "reason": row["reason"], "reference": row["reference"],
+                "created_at": parse_time(row["created_at"])}
+
+    def recent_credits(self, uid, limit):
+        """최근 기록부터."""
+        rows = self._get("credit_ledger", user_id=f"eq.{uid}", order="id.desc", limit=limit)
+        return [self._credit(r) for r in rows]
+
+    def spend_credit(self, uid, amount, reason, reference):
+        """잔액 확인과 차감을 DB 함수 하나로 한다. 같은 사용자의 요청은 DB 안에서 줄을 서서 한쪽만 통과한다."""
+        result = self._rpc("spend_credit", p_user_id=uid, p_amount=amount, p_reason=reason, p_reference=reference)
+        return {"ok": bool(result["ok"]), "balance": int(result["balance"])}
+
     def delete_all(self, uid):
+        # 크레딧 원장(credit_ledger)은 지우지 않는다. 지우면 다시 들어와 가입 무료 크레딧을 또 받을 수 있다.
+        # 로그인 계정 자체를 지우면 외래 키(on delete cascade)로 함께 지워진다.
         for table in ("messages", "summaries", "memories", "reminders", "characters", "user_settings"):
             self._delete(table, user_id=f"eq.{uid}")

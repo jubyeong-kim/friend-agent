@@ -21,6 +21,10 @@ class MemoryStore:
         self.lock = threading.Lock()
         self.ids = itertools.count(1)
         self.users = {}
+        # 크레딧 원장은 사용자 데이터(self.users) 밖에 둔다. 내 데이터 전체 삭제(delete_all)로 지워지지 않게 하기 위해서다.
+        # 지워지면 삭제 뒤 다시 들어와 가입 무료 크레딧을 또 받을 수 있다.
+        self.ledger = []
+        self.credit_refs = set()
 
     def _user(self, uid):
         return self.users.setdefault(uid, {
@@ -117,5 +121,44 @@ class MemoryStore:
                     claimed.append(dict(r))
         return claimed
 
+    # 크레딧 원장
+    def _balance(self, uid):
+        """잠금 안에서 부른다(threading.Lock 은 다시 잡을 수 없다)."""
+        return sum(row["delta"] for row in self.ledger if row["user_id"] == uid)
+
+    def credit_balance(self, uid):
+        with self.lock:
+            return self._balance(uid)
+
+    def add_credit(self, uid, delta, reason, reference):
+        """참조(reference)가 이미 있으면 쌓지 않고 duplicate=True 를 돌려준다."""
+        with self.lock:
+            if reference in self.credit_refs:
+                return {"duplicate": True}
+            row = {"id": next(self.ids), "user_id": uid, "delta": delta, "reason": reason,
+                   "reference": reference, "created_at": utcnow()}
+            self.ledger.append(row)
+            self.credit_refs.add(reference)
+        return {**row, "duplicate": False}
+
+    def recent_credits(self, uid, limit):
+        """최근 기록부터."""
+        with self.lock:
+            rows = [dict(row) for row in self.ledger if row["user_id"] == uid]
+        return rows[::-1][:limit]
+
+    def spend_credit(self, uid, amount, reason, reference):
+        """잔액 확인과 차감을 잠금 하나 안에서 한다. 잔액 1 에 두 요청이 동시에 와도 한쪽만 통과한다."""
+        with self.lock:
+            if reference in self.credit_refs:  # DB 의 유일 제약과 같게
+                raise ValueError("이미 있는 크레딧 참조입니다")
+            balance = self._balance(uid)
+            if balance < amount:
+                return {"ok": False, "balance": balance}
+            self.ledger.append({"id": next(self.ids), "user_id": uid, "delta": -amount, "reason": reason,
+                                "reference": reference, "created_at": utcnow()})
+            self.credit_refs.add(reference)
+        return {"ok": True, "balance": balance - amount}
+
     def delete_all(self, uid):
-        self.users.pop(uid, None)
+        self.users.pop(uid, None)  # 크레딧 원장은 남긴다(위 __init__ 설명)

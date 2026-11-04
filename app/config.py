@@ -20,6 +20,10 @@ PROVIDERS = {
     "fake": {"base_url": None, "model": "fake"},
 }
 
+# 크레딧 숫자는 여기 한곳에서만 정한다. 화면은 계산하지 않고 서버가 준 잔액만 보여 준다.
+SIGNUP_CREDITS = 20       # 처음 온 사용자에게 한 번 주는 무료 크레딧
+CREDITS_PER_MESSAGE = 1   # /api/chat 메시지 하나에 쓰는 크레딧(위기 표현은 차감하지 않는다)
+
 
 @dataclass
 class Settings:
