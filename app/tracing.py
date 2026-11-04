@@ -29,6 +29,8 @@ ROUTE_HIDDEN = "[길찾기 결과 가림]"
 SAFETY_TAG = "safety"  # 안전 응답을 보낸 트레이스의 tag
 TIMEOUT = 2              # Langfuse 전송 시간 제한(초). SDK 기본은 5초
 SCORE_FLUSH_WAIT = 1.0   # 점수를 보낼 때 요청이 기다리는 최대 시간(초)
+PROMPT_LABEL = "production"  # LANGFUSE_PROMPT_LABEL 이 없을 때 가져올 프롬프트 라벨
+PROMPT_CACHE = 60            # 가져온 프롬프트를 다시 묻기까지(초)
 
 _client = None
 _generation = ContextVar("langfuse_generation", default=None)  # LLM 클래스가 기록할 generation
@@ -220,6 +222,28 @@ def finish(root, **fields):
 def link(obs):
     """답 메시지 meta 에 더할 트레이스 ID. 계측이 꺼져 있으면 빈 dict(meta 가 지금과 같다)."""
     return {"trace_id": obs.trace_id} if obs.trace_id else {}
+
+
+def get_prompt(name):
+    """Langfuse 에서 LANGFUSE_PROMPT_LABEL(없으면 production) 라벨이 붙은 텍스트 프롬프트를 가져온다.
+    계측이 꺼져 있거나 가져오지 못하면 None. 부르는 쪽이 코드에 적힌 글을 쓴다.
+    한 번 가져오면 PROMPT_CACHE 초 동안 다시 묻지 않고, 그 뒤에도 새 버전은 뒤에서 받아 요청을 멈추지 않는다."""
+    if _client is None:
+        return None
+    label = os.environ.get("LANGFUSE_PROMPT_LABEL", "").strip() or PROMPT_LABEL
+    try:
+        return _client.get_prompt(name, label=label, cache_ttl_seconds=PROMPT_CACHE,
+                                  max_retries=0, fetch_timeout_seconds=TIMEOUT)
+    except Exception as error:
+        log("WARNING", "Langfuse 프롬프트를 못 가져와 코드의 글을 씀", name=name, label=label, error=type(error).__name__)
+        return None
+
+
+def link_prompt(prompt):
+    """지금 기록 중인 generation 에 쓴 프롬프트 버전을 잇는다(Langfuse 에서 버전별 비용 · 점수를 볼 수 있다)."""
+    gen = _generation.get()
+    if gen is not None and prompt is not None:
+        gen.update(prompt=prompt)
 
 
 def score(trace_id, name, value, comment=None, timestamp=None):
