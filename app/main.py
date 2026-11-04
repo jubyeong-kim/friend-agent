@@ -37,7 +37,7 @@ from app.auth import Auth, User
 from app.config import CREDITS_PER_MESSAGE, LOW_CREDITS, PRODUCTS, ROOT, SIGNUP_CREDITS, load_settings
 from app.llm import make_llm
 from app.logs import log
-from app.payments import TossPayments
+from app.payments import TossPayments, idempotency_key
 from app.persona import DEFAULT_CHARACTER, OPTIONS, build_persona, clean_character
 from app.safety import is_crisis
 from app.store.base import make_store
@@ -242,12 +242,15 @@ def confirm_payment(req: ConfirmRequest, user: User = Depends(current_user), tos
         raise HTTPException(400, "결제 금액이 주문과 달라요")
 
     result = toss.confirm(req.payment_key, order["order_id"], order["amount"])
+    # 승인 API 를 부를 때마다 한 줄. 주문 번호와 멱등키(confirm-주문번호)로 토스 쪽 기록과 맞춰 볼 수 있다.
+    # 시크릿 키, paymentKey, user_id, 토스가 준 문구 원문은 넣지 않는다(실패 코드만)
+    log("INFO" if result["result"] == "done" else "WARNING", "결제 승인 호출", order_id=order["order_id"],
+        idempotency_key=idempotency_key(order["order_id"]), result=result["result"],
+        **({"code": result["code"]} if "code" in result else {}))
     if result["result"] == "unknown":  # 승인됐는지 모른다. 대기로 두고 같은 멱등키로 다시 시도하게 한다
-        log("WARNING", "결제 승인 결과 모름", code=result["code"])
         raise HTTPException(502, RETRY_MESSAGE)
     if result["result"] == "rejected":
         store.fail_order(user.id, order["order_id"])
-        log("WARNING", "결제 승인 거절", code=result["code"])
         raise HTTPException(400, {"code": result["code"], "message": result["message"] or "결제를 승인하지 못했어요."})
 
     # 여기부터는 토스에서 승인된 상태. 크레딧을 먼저 쌓고(참조가 유일해서 몇 번 와도 한 번만) 주문을 완료로 바꾼다.

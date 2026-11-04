@@ -196,10 +196,11 @@ class SupabaseStore:
         return self._order(rows[0]) if rows else None
 
     def complete_order(self, uid, order_id, payment_key, approved_at):
-        """status 가 pending 인 행만 바꾸는 조건부 업데이트. 요청 두 개가 동시에 와도 한쪽만 그 행을 돌려받는다."""
+        """status 가 pending 이나 failed 인 행만 바꾸는 조건부 업데이트. 요청 두 개가 동시에 와도 한쪽만 그 행을 돌려받는다.
+        토스가 승인한 주문은 실패 표시가 먼저 왔더라도 완료로 바꾼다(돈이 승인됐으면 완료)."""
         rows = self._update("orders", {"status": "done", "payment_key": payment_key,
                                        "approved_at": iso(approved_at) if approved_at else None},
-                            user_id=f"eq.{uid}", order_id=f"eq.{order_id}", status="eq.pending")
+                            user_id=f"eq.{uid}", order_id=f"eq.{order_id}", status="in.(pending,failed)")
         return bool(rows)
 
     def fail_order(self, uid, order_id):

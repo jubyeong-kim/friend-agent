@@ -178,20 +178,22 @@ class MemoryStore:
             row = self.orders.get(order_id)
             return dict(row) if row and row["user_id"] == uid else None
 
-    def _finish_order(self, uid, order_id, **values):
-        """대기(pending)인 내 주문만 바꾼다. 바꿨으면 True. 두 요청이 동시에 와도 한쪽만 True."""
+    def _finish_order(self, uid, order_id, allowed, **values):
+        """상태가 allowed 중 하나인 내 주문만 바꾼다. 바꿨으면 True. 두 요청이 동시에 와도 한쪽만 True."""
         with self.lock:
             row = self.orders.get(order_id)
-            if not row or row["user_id"] != uid or row["status"] != "pending":
+            if not row or row["user_id"] != uid or row["status"] not in allowed:
                 return False
             row.update(values)
             return True
 
     def complete_order(self, uid, order_id, payment_key, approved_at):
-        return self._finish_order(uid, order_id, status="done", payment_key=payment_key, approved_at=approved_at)
+        # 토스가 승인한 주문은 실패 표시가 먼저 왔더라도 완료로 바꾼다(돈이 승인됐으면 완료)
+        return self._finish_order(uid, order_id, ("pending", "failed"), status="done",
+                                  payment_key=payment_key, approved_at=approved_at)
 
     def fail_order(self, uid, order_id):
-        return self._finish_order(uid, order_id, status="failed")
+        return self._finish_order(uid, order_id, ("pending",), status="failed")
 
     def delete_all(self, uid):
         self.users.pop(uid, None)  # 크레딧 원장과 주문은 남긴다(위 __init__ 설명)

@@ -8,6 +8,7 @@
 import base64
 import json
 import logging
+import threading
 import uuid
 
 import httpx
@@ -157,3 +158,211 @@ def test_access_log_hides_payment_key():
     main.HidePaymentKey().filter(record)
     line = record.getMessage()
     assert "tgen_secret_value" not in line and "paymentKey=hidden" in line and "amount=5000" in line
+
+
+# ── 12-7 중복 결제와 위조 막기 ─────────────────────────────────────────
+# 실제 토스는 부르지 않는다. 가짜 승인이 몇 번 불렸는지(toss["calls"])로 「토스까지 갔는지」를 본다.
+
+PAYMENT_KEY = "tgen_fake_payment_key_12_7"   # 가짜 값
+
+
+def done_payment(body):
+    """승인된 Payment 객체 모양의 가짜 응답(코어 API 문서의 칸만)."""
+    return {"paymentKey": body["paymentKey"], "orderId": body["orderId"], "status": "DONE", "method": "카드",
+            "totalAmount": body["amount"], "approvedAt": "2026-11-04T15:00:00+09:00"}
+
+
+def swap_toss(handler):
+    """이 테스트에서만 가짜 승인의 답을 바꾼다. toss 픽스처가 끝날 때 함께 되돌린다."""
+    app.dependency_overrides[main.get_payments] = lambda: TossPayments(FAKE_SECRET, transport=httpx.MockTransport(handler))
+
+
+def new_order(product_id="credits_550"):
+    return client.post("/api/orders", json={"product_id": product_id}).json()
+
+
+def confirm(order, amount=None, payment_key=PAYMENT_KEY):
+    return client.post("/api/payments/confirm", json={"payment_key": payment_key, "order_id": order["order_id"],
+                                                      "amount": order["amount"] if amount is None else amount})
+
+
+def purchases(uid):
+    return [c for c in store.recent_credits(uid, 50) if c["reason"] == "purchase"]
+
+
+def test_same_confirm_twice_adds_credits_once(uid, toss):
+    """같은 승인 요청을 두 번(성공 화면 새로고침): 두 번째는 already 이고 토스를 다시 안 부른다. 크레딧과 원장 줄은 한 번만."""
+    order = new_order("credits_100")
+    first, second = confirm(order), confirm(order)
+    assert first.json() == {"credits": 100, "balance": 100, "already": False}
+    assert second.status_code == 200 and second.json() == {"credits": 100, "balance": 100, "already": True}
+    assert len(toss["calls"]) == 1
+    assert [(c["delta"], c["reference"]) for c in purchases(uid)] == [(100, f"order:{order['order_id']}")]
+
+
+def test_two_confirms_at_once_add_credits_once(uid, toss):
+    """두 요청이 동시에 승인 단계에 들어가 둘 다 토스를 불러도 크레딧은 한 번만 쌓이고 주문은 완료 하나다.
+    (진짜 토스는 같은 멱등키의 두 번째에 409 를 줄 수 있다. 여기서는 둘 다 성공하는 더 나쁜 경우로 본다)"""
+    order = new_order()
+    together = threading.Barrier(2, timeout=5)
+
+    def handler(request):
+        together.wait()   # 두 요청이 모두 토스 호출 안에 들어온 뒤에 답한다
+        return httpx.Response(200, json=done_payment(json.loads(request.content)))
+
+    fake = TossPayments(FAKE_SECRET, transport=httpx.MockTransport(handler))
+    req = main.ConfirmRequest(payment_key=PAYMENT_KEY, order_id=order["order_id"], amount=order["amount"])
+    results, errors = [], []
+
+    def run():
+        try:
+            results.append(main.confirm_payment(req, user=User(uid, anonymous=True), toss=fake))
+        except Exception as error:  # 스레드 안 오류도 테스트가 보게
+            errors.append(error)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(results) == 2
+    assert len(purchases(uid)) == 1 and store.credit_balance(uid) == 550
+    assert store.get_order(uid, order["order_id"])["status"] == "done"
+
+
+def test_changed_amount_is_refused_before_toss(uid, toss):
+    """주소의 금액을 바꿔 보내면 400. 가짜 승인은 한 번도 안 불리고, 주문은 대기, 원장은 그대로. 맞는 금액으로는 그 뒤에도 승인된다."""
+    order = new_order("credits_1200")
+    r = confirm(order, amount=100)
+    assert r.status_code == 400
+    assert toss["calls"] == []
+    assert store.get_order(uid, order["order_id"])["status"] == "pending"
+    assert store.recent_credits(uid, 10) == []
+    assert confirm(order).status_code == 200 and store.credit_balance(uid) == 1200
+
+
+def test_someone_elses_order_is_not_found(uid, toss):
+    """다른 사용자가 남의 주문 번호로 승인 · 실패를 보내면 승인은 404, 실패 표시는 아무것도 안 바꾼다. 가짜 승인은 안 불리고 주인 주문은 그대로."""
+    order = new_order()
+    app.dependency_overrides[main.current_user] = lambda: User(f"intruder-{uuid.uuid4().hex}", anonymous=True)
+    assert confirm(order).status_code == 404
+    client.post("/api/payments/fail", json={"order_id": order["order_id"], "code": "PAY_PROCESS_CANCELED"})
+    assert toss["calls"] == []
+    assert store.get_order(uid, order["order_id"])["status"] == "pending"
+    assert store.credit_balance(uid) == 0
+
+
+def answer_timeout(request, body):
+    raise httpx.ReadTimeout("가짜 시간 초과", request=request)
+
+
+def answer_already_processed(request, body):
+    return httpx.Response(400, json={"code": "ALREADY_PROCESSED_PAYMENT", "message": "이미 처리된 결제 입니다."})
+
+
+def answer_not_done(request, body):
+    return httpx.Response(200, json={**done_payment(body), "status": "IN_PROGRESS"})
+
+
+def answer_other_amount(request, body):
+    return httpx.Response(200, json={**done_payment(body), "totalAmount": body["amount"] + 1})
+
+
+@pytest.mark.parametrize("answer", [answer_timeout, answer_already_processed, answer_not_done, answer_other_amount])
+def test_unknown_result_keeps_order_pending_then_retry_works(uid, toss, answer):
+    """기존 실패 테스트(403 · 500 · 409)에 없는 「결과 모름」 경우: 502 · 주문 대기 · 크레딧 0.
+    그 뒤 다시 보내면 같은 멱등키로 승인되고 크레딧은 한 번만."""
+    order = new_order()
+    keys = []
+
+    def handler(request):
+        keys.append(request.headers["idempotency-key"])
+        return answer(request, json.loads(request.content))
+
+    swap_toss(handler)
+    assert confirm(order).status_code == 502
+    assert store.get_order(uid, order["order_id"])["status"] == "pending" and store.credit_balance(uid) == 0
+
+    def approve(request):
+        keys.append(request.headers["idempotency-key"])
+        return httpx.Response(200, json=done_payment(json.loads(request.content)))
+
+    swap_toss(approve)
+    assert confirm(order).json() == {"credits": 550, "balance": 550, "already": False}
+    assert keys == [f"confirm-{order['order_id']}"] * 2 and len(purchases(uid)) == 1
+
+
+def test_rejected_order_is_not_sent_again(uid, toss):
+    """토스가 거절해 실패가 된 주문을 다시 보내면 409. 토스를 다시 부르지 않고 크레딧은 0."""
+    order = new_order()
+    toss["reply"] = (403, {"code": "REJECT_CARD_COMPANY", "message": "카드사에서 거절했어요"})
+    assert confirm(order).status_code == 400
+    toss["reply"] = None
+    assert confirm(order).status_code == 409
+    assert len(toss["calls"]) == 1 and store.credit_balance(uid) == 0
+
+
+@pytest.mark.parametrize("broken", ["add_credit", "complete_order"])
+def test_record_failure_then_retry_adds_credits_once(uid, toss, monkeypatch, broken):
+    """승인 뒤 기록(크레딧 또는 주문 완료)이 한 번 실패하면 500 · 주문 대기.
+    다시 보내면 같은 멱등키로 승인하고, 크레딧은 한 번만 쌓이고, 주문은 완료된다."""
+    order = new_order()
+    real = getattr(store, broken)
+
+    def fail_once(*args, **kwargs):
+        monkeypatch.setattr(store, broken, real)   # 다음 호출부터는 정상
+        raise RuntimeError("가짜 저장소 오류")
+
+    monkeypatch.setattr(store, broken, fail_once)
+    first = confirm(order)
+    assert first.status_code == 500
+    assert store.get_order(uid, order["order_id"])["status"] == "pending"
+    second = confirm(order)
+    assert second.status_code == 200 and second.json()["credits"] == 550
+    assert len(purchases(uid)) == 1 and store.credit_balance(uid) == 550
+    assert store.get_order(uid, order["order_id"])["status"] == "done"
+    assert [c["headers"]["idempotency-key"] for c in toss["calls"]] == [f"confirm-{order['order_id']}"] * 2
+
+
+def test_confirm_log_lines_have_key_but_no_secrets(uid, toss, capsys):
+    """승인 API 를 부를 때마다 「결제 승인 호출」 한 줄(주문 번호 · 같은 멱등키 · 결과). 토스를 안 부르면 줄도 없다.
+    로그 어디에도 paymentKey · 시크릿 키(원문과 base64) · user_id 가 없다."""
+    order = new_order()
+    toss["reply"] = (500, {"code": "FAILED_INTERNAL_SYSTEM_PROCESSING", "message": "내부 오류"})
+    confirm(order)                       # 1) 결과 모름
+    toss["reply"] = None
+    confirm(order)                       # 2) 승인
+    confirm(order)                       # 3) 이미 완료 → 토스 안 부름
+    out = capsys.readouterr().out
+    lines = []
+    for raw in out.splitlines():
+        try:
+            lines.append(json.loads(raw))
+        except ValueError:
+            pass
+    calls = [line for line in lines if line.get("message") == "결제 승인 호출"]
+    key = f"confirm-{order['order_id']}"
+    assert [(c["order_id"], c["idempotency_key"], c["result"]) for c in calls] == [
+        (order["order_id"], key, "unknown"), (order["order_id"], key, "done")]
+    assert calls[0]["code"] == "FAILED_INTERNAL_SYSTEM_PROCESSING" and "code" not in calls[1]
+    basic = base64.b64encode(f"{FAKE_SECRET}:".encode()).decode()
+    for hidden in (PAYMENT_KEY, FAKE_SECRET, basic, uid):
+        assert hidden not in out
+
+
+def test_fail_mark_during_confirm_keeps_order_and_ledger_consistent(uid, toss):
+    """승인 API 가 답하기 전에 /api/payments/fail 이 같은 주문을 실패로 바꾸는 경우.
+    바라는 모습: 크레딧이 쌓였으면 주문은 done, 주문이 failed 면 크레딧은 없음(돈은 받았는데 주문은 실패인 상태가 없어야)."""
+    order = new_order()
+
+    def handler(request):
+        body = json.loads(request.content)
+        # 승인이 처리되는 사이에 같은 사용자의 실패 표시 요청이 먼저 끝난 것처럼
+        main.payment_failed(main.FailRequest(order_id=body["orderId"], code="PAY_PROCESS_CANCELED"),
+                            user=User(uid, anonymous=True))
+        return httpx.Response(200, json=done_payment(body))
+
+    swap_toss(handler)
+    confirm(order)
+    state = (len(purchases(uid)), store.get_order(uid, order["order_id"])["status"])
+    assert state in ((1, "done"), (0, "failed")), f"크레딧 줄 {state[0]}개 · 주문 {state[1]}"

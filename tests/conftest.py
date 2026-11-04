@@ -8,7 +8,8 @@ import uuid
 import pytest
 
 os.environ.update({"LLM_PROVIDER": "fake", "LLM_API_KEY": "", "STORAGE": "memory", "AUTH": "none",
-                   "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": ""})  # 테스트 데이터를 Langfuse 로 보내지 않는다
+                   "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": "",  # 테스트 데이터를 Langfuse 로 보내지 않는다
+                   "TOSS_CLIENT_KEY": "", "TOSS_SECRET_KEY": ""})  # 진짜 토스 승인 클라이언트를 만들지 않는다(결제 테스트는 가짜를 끼운다)
 os.environ.setdefault("ENV", "test")
 
 
