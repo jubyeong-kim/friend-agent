@@ -21,6 +21,11 @@ class MemoryStore:
         self.lock = threading.Lock()
         self.ids = itertools.count(1)
         self.users = {}
+        # 크레딧 원장은 사용자 데이터(self.users) 밖에 둔다. 내 데이터 전체 삭제(delete_all)로 지워지지 않게 하기 위해서다.
+        # 지워지면 삭제 뒤 다시 들어와 가입 무료 크레딧을 또 받을 수 있다.
+        self.ledger = []
+        self.credit_refs = set()
+        self.orders = {}  # 주문 번호 → 주문. 원장처럼 사용자 데이터 밖에 둬서 delete_all 로 지워지지 않는다
 
     def _user(self, uid):
         return self.users.setdefault(uid, {
@@ -117,5 +122,78 @@ class MemoryStore:
                     claimed.append(dict(r))
         return claimed
 
+    # 크레딧 원장
+    def _balance(self, uid):
+        """잠금 안에서 부른다(threading.Lock 은 다시 잡을 수 없다)."""
+        return sum(row["delta"] for row in self.ledger if row["user_id"] == uid)
+
+    def credit_balance(self, uid):
+        with self.lock:
+            return self._balance(uid)
+
+    def add_credit(self, uid, delta, reason, reference):
+        """참조(reference)가 이미 있으면 쌓지 않고 duplicate=True 를 돌려준다."""
+        with self.lock:
+            if reference in self.credit_refs:
+                return {"duplicate": True}
+            row = {"id": next(self.ids), "user_id": uid, "delta": delta, "reason": reason,
+                   "reference": reference, "created_at": utcnow()}
+            self.ledger.append(row)
+            self.credit_refs.add(reference)
+        return {**row, "duplicate": False}
+
+    def recent_credits(self, uid, limit):
+        """최근 기록부터."""
+        with self.lock:
+            rows = [dict(row) for row in self.ledger if row["user_id"] == uid]
+        return rows[::-1][:limit]
+
+    def spend_credit(self, uid, amount, reason, reference):
+        """잔액 확인과 차감을 잠금 하나 안에서 한다. 잔액 1 에 두 요청이 동시에 와도 한쪽만 통과한다."""
+        with self.lock:
+            if reference in self.credit_refs:  # DB 의 유일 제약과 같게
+                raise ValueError("이미 있는 크레딧 참조입니다")
+            balance = self._balance(uid)
+            if balance < amount:
+                return {"ok": False, "balance": balance}
+            self.ledger.append({"id": next(self.ids), "user_id": uid, "delta": -amount, "reason": reason,
+                                "reference": reference, "created_at": utcnow()})
+            self.credit_refs.add(reference)
+        return {"ok": True, "balance": balance - amount}
+
+    # 크레딧 주문. 조회와 변경은 늘 로그인한 사용자(uid)의 주문만 본다
+    def create_order(self, uid, order_id, product_id, amount, credits):
+        with self.lock:
+            if order_id in self.orders:  # DB 의 유일 제약과 같게
+                raise ValueError("이미 있는 주문 번호입니다")
+            row = {"id": next(self.ids), "order_id": order_id, "user_id": uid, "product_id": product_id,
+                   "amount": amount, "credits": credits, "status": "pending", "payment_key": None,
+                   "approved_at": None, "created_at": utcnow()}
+            self.orders[order_id] = row
+            return dict(row)
+
+    def get_order(self, uid, order_id):
+        """내 주문만. 남의 주문은 없는 것과 똑같이 None."""
+        with self.lock:
+            row = self.orders.get(order_id)
+            return dict(row) if row and row["user_id"] == uid else None
+
+    def _finish_order(self, uid, order_id, allowed, **values):
+        """상태가 allowed 중 하나인 내 주문만 바꾼다. 바꿨으면 True. 두 요청이 동시에 와도 한쪽만 True."""
+        with self.lock:
+            row = self.orders.get(order_id)
+            if not row or row["user_id"] != uid or row["status"] not in allowed:
+                return False
+            row.update(values)
+            return True
+
+    def complete_order(self, uid, order_id, payment_key, approved_at):
+        # 토스가 승인한 주문은 실패 표시가 먼저 왔더라도 완료로 바꾼다(돈이 승인됐으면 완료)
+        return self._finish_order(uid, order_id, ("pending", "failed"), status="done",
+                                  payment_key=payment_key, approved_at=approved_at)
+
+    def fail_order(self, uid, order_id):
+        return self._finish_order(uid, order_id, ("pending",), status="failed")
+
     def delete_all(self, uid):
-        self.users.pop(uid, None)
+        self.users.pop(uid, None)  # 크레딧 원장과 주문은 남긴다(위 __init__ 설명)
