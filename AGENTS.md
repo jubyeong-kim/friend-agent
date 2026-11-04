@@ -10,6 +10,7 @@
 - 무언가를 삭제하기 전에는 지우는 대상의 이름과 리전을 다시 보여 주고 확인을 받는다.
 - 템플릿에 들어 있는 GitHub Actions 액션 버전을 바꾸지 않는다.
 - 배포용 이미지는 GitHub Actions 에서만 만든다. 내 컴퓨터에서 만든 이미지를 Artifact Registry 에 올리거나 배포하지 않는다.
+- 되돌릴 때는 Cloud Run 리비전과 Langfuse 프롬프트 라벨(router-prompt 의 production · staging)을 둘 다 본다. 코드를 되돌려도 라벨이 다른 버전을 가리키면 지시문은 그대로다.
 
 ## 비밀값
 - API 키 같은 비밀값을 코드, 로그, 화면, 커밋에 남기지 않는다.
