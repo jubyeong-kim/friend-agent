@@ -224,13 +224,13 @@ def link(obs):
     return {"trace_id": obs.trace_id} if obs.trace_id else {}
 
 
-def get_prompt(name):
-    """Langfuse 에서 LANGFUSE_PROMPT_LABEL(없으면 production) 라벨이 붙은 텍스트 프롬프트를 가져온다.
+def get_prompt(name, label=None):
+    """Langfuse 에서 label(없으면 LANGFUSE_PROMPT_LABEL, 그것도 없으면 production) 라벨이 붙은 텍스트 프롬프트를 가져온다.
     계측이 꺼져 있거나 가져오지 못하면 None. 부르는 쪽이 코드에 적힌 글을 쓴다.
     한 번 가져오면 PROMPT_CACHE 초 동안 다시 묻지 않고, 그 뒤에도 새 버전은 뒤에서 받아 요청을 멈추지 않는다."""
     if _client is None:
         return None
-    label = os.environ.get("LANGFUSE_PROMPT_LABEL", "").strip() or PROMPT_LABEL
+    label = label or os.environ.get("LANGFUSE_PROMPT_LABEL", "").strip() or PROMPT_LABEL
     try:
         return _client.get_prompt(name, label=label, cache_ttl_seconds=PROMPT_CACHE,
                                   max_retries=0, fetch_timeout_seconds=TIMEOUT)

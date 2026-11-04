@@ -186,11 +186,11 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
-def model_choose(message, history, now, location, llm):
+def model_choose(message, history, now, location, llm, label=None):
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:]) or "(없음)"
     user = (f"[지금] {now.isoformat()} ({when.WEEKDAYS[now.weekday()]}요일)\n[달력]\n{when.calendar_hint(now)}\n"
             f"[사용자 지역] {location}\n[최근 대화]\n{recent}\n\n[메시지]\n{message}")
-    prompt = tracing.get_prompt(PROMPT_NAME)
+    prompt = tracing.get_prompt(PROMPT_NAME, label)  # label 은 A/B 의 prod-a · prod-b. 없으면 기본 라벨
     tracing.link_prompt(prompt)
     data = llm.complete_json(router_prompt(prompt), user)
     tools = []
@@ -311,10 +311,10 @@ def limit_tools(tools, guards):
     return kept, dropped
 
 
-def choose(message, history, now, location, llm):
+def choose(message, history, now, location, llm, label=None):
     if getattr(llm, "can_reason", False):
         try:
-            result = model_choose(message, history, now, location, llm)
+            result = model_choose(message, history, now, location, llm, label)
         except Exception as error:  # 모델 응답이 형식에 맞지 않으면 규칙으로 대신한다
             log("WARNING", "모델 도구 선택 실패, 키워드 규칙으로 대신함", error=type(error).__name__)
             result = rule_choose(message, now, location)
