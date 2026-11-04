@@ -14,7 +14,7 @@
 import time
 from datetime import timedelta
 
-from app import memory, tracing, when
+from app import abtest, memory, tracing, when
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, build_persona
 from app.router import MAX_REMINDERS, choose
@@ -73,10 +73,12 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
 
 
 def run_turn(message, uid, llm, store, show_panel):
+    variant = abtest.variant(uid)  # A/B 가 꺼져 있으면 None
+    ab = {"ab_test": abtest.experiment(), "ab_variant": variant} if variant else None
     turn = tracing.trace("chat-turn", user_id=uid, session_id=tracing.session_id(uid, when.now_in("Asia/Seoul")),
-                         input=message)
+                         tags=[f"ab-{variant}"] if variant else (), trace_metadata=ab, input=message)
     try:
-        yield from turn_events(message, uid, llm, store, show_panel, turn)
+        yield from turn_events(message, uid, llm, store, show_panel, turn, abtest.LABELS.get(variant))
     except Exception as error:
         turn.update(level="ERROR", status_message=type(error).__name__)
         raise
@@ -84,7 +86,7 @@ def run_turn(message, uid, llm, store, show_panel):
         tracing.finish(turn)
 
 
-def turn_events(message, uid, llm, store, show_panel, turn):
+def turn_events(message, uid, llm, store, show_panel, turn, prompt_label=None):
     model_name = getattr(llm, "model", None)
     settings = store.get_settings(uid)
     character = store.get_character(uid) or DEFAULT_CHARACTER
@@ -119,7 +121,7 @@ def turn_events(message, uid, llm, store, show_panel, turn):
 
     # ② 도구 선택. 모델이 골랐으면 출력은 모델 응답 원문, 규칙이 골랐으면 고른 도구다
     gen = turn.child("choose-tools", "generation", model=model_name, input=message)
-    choice = gen.run(choose, message, history, now, settings["location"], llm)
+    choice = gen.run(choose, message, history, now, settings["location"], llm, prompt_label)
     if caution:
         choice.guards.append("스스로를 해칠 수 있다는 신호일 수 있는 표현이 있어 답 만들기에 [조심] 메모를 붙였습니다.")
     gen.end(output=choice.tools if choice.decided_by == "rule" else None,
