@@ -179,8 +179,36 @@ class SupabaseStore:
         result = self._rpc("spend_credit", p_user_id=uid, p_amount=amount, p_reason=reason, p_reference=reference)
         return {"ok": bool(result["ok"]), "balance": int(result["balance"])}
 
+    # 크레딧 주문(supabase/migrations/0003_orders.sql). 모든 조회와 변경에 user_id 조건을 붙인다
+    def _order(self, row):
+        return {"id": row["id"], "order_id": row["order_id"], "product_id": row["product_id"],
+                "amount": row["amount"], "credits": row["credits"], "status": row["status"],
+                "payment_key": row["payment_key"], "approved_at": parse_time(row["approved_at"]),
+                "created_at": parse_time(row["created_at"])}
+
+    def create_order(self, uid, order_id, product_id, amount, credits):
+        return self._order(self._insert("orders", {"user_id": uid, "order_id": order_id, "product_id": product_id,
+                                                   "amount": amount, "credits": credits}))
+
+    def get_order(self, uid, order_id):
+        """내 주문만. 남의 주문은 없는 것과 똑같이 None."""
+        rows = self._get("orders", user_id=f"eq.{uid}", order_id=f"eq.{order_id}", limit=1)
+        return self._order(rows[0]) if rows else None
+
+    def complete_order(self, uid, order_id, payment_key, approved_at):
+        """status 가 pending 인 행만 바꾸는 조건부 업데이트. 요청 두 개가 동시에 와도 한쪽만 그 행을 돌려받는다."""
+        rows = self._update("orders", {"status": "done", "payment_key": payment_key,
+                                       "approved_at": iso(approved_at) if approved_at else None},
+                            user_id=f"eq.{uid}", order_id=f"eq.{order_id}", status="eq.pending")
+        return bool(rows)
+
+    def fail_order(self, uid, order_id):
+        rows = self._update("orders", {"status": "failed"}, user_id=f"eq.{uid}", order_id=f"eq.{order_id}",
+                            status="eq.pending")
+        return bool(rows)
+
     def delete_all(self, uid):
-        # 크레딧 원장(credit_ledger)은 지우지 않는다. 지우면 다시 들어와 가입 무료 크레딧을 또 받을 수 있다.
+        # 크레딧 원장(credit_ledger)과 주문(orders)은 지우지 않는다. 지우면 다시 들어와 가입 무료 크레딧을 또 받을 수 있다.
         # 로그인 계정 자체를 지우면 외래 키(on delete cascade)로 함께 지워진다.
         for table in ("messages", "summaries", "memories", "reminders", "characters", "user_settings"):
             self._delete(table, user_id=f"eq.{uid}")
