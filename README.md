@@ -77,7 +77,8 @@ cd <저장소 이름>
 | `SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...` | 브라우저에 공개해도 되는 키. 로그인에만 쓴다 |
 | `SUPABASE_SECRET_KEY` | `sb_secret_...` | `STORAGE=supabase` 일 때 필수. RLS를 건너뛰는 키라서 Secret Manager에 둔다 |
 | `GOOGLE_LOGIN` | `true`, `false` | 구글 계정 연결 버튼 표시 |
-| `OCR_ENABLED` | `true`, `false` | 사진 글자 읽기(📷 버튼). 운영체제에 tesseract 프로그램과 한국어 데이터가 있어야 한다 |
+| `OCR_ENABLED` | `true`, `false` | 사진 글자 읽기(📷 버튼). 글자 읽기 모델 파일 두 개가 있어야 한다(아래 「단계별로 켜는 기능」) |
+| `OCR_MODEL_DIR` | 폴더 경로 | 글자 읽기 모델 파일이 있는 폴더. 기본값 `/opt/ocr-models`(Dockerfile 이 넣는 곳). 노트북에서는 `.ocr-models` 처럼 받은 폴더를 적는다 |
 | `COMMIT_SHA` | 커밋 해시 | `/version` 에 표시된다. 자동 배포에서 넣는다 |
 | `BANNER` | 짧은 문구 | 화면 위에 띠로 보이고 `/version` 에도 나온다. 이미지를 새로 만들지 않고 새 리비전을 만들어 볼 때 쓴다 |
 | `SLOW_START_SECONDS` | 초 | 배포 실습용 시작 지연. 포트는 바로 열지만 이 시간 동안 모든 요청(`/health` 포함)에 503을 돌려준다. 기본값 0 |
@@ -156,8 +157,18 @@ gcloud run deploy friend-agent --source . --region us-central1 --allow-unauthent
 | 재배포해도 남는 저장, 사용자별 데이터 | `STORAGE=supabase`, `AUTH=supabase` | Supabase 프로젝트, 익명 로그인 켜기. 절차는 `docs/supabase.md`. 동료에게 공개하기 전에 구글 로그인과 함께 붙인다 |
 | 구글 계정 연결 | `GOOGLE_LOGIN=true` | Supabase 구글 로그인 설정, 수동 연결(manual linking) 켜기 |
 | 이동 시간(대중교통) | `KAKAO_REST_KEY` (Secret Manager 로 연결) | 카카오 디벨로퍼스 앱, [카카오맵] 사용 설정. 키가 없으면 이 도구만 꺼진다 |
-| 사진 글자 읽기 | `OCR_ENABLED=true` | tesseract 프로그램. 노트북: `brew install tesseract tesseract-lang`(macOS). 서버: Dockerfile에 설치(`starter/Dockerfile`) |
+| 사진 글자 읽기 | `OCR_ENABLED=true` | PaddleOCR 공개 모델 파일 두 개(약 23MB, Apache-2.0). 서버: Dockerfile 이 이미지에 넣는다. 노트북: 아래처럼 받는다 |
 | 앱을 닫아 둬도 오는 약속 알림 | 아직 없음 | Cloud Scheduler, 웹 푸시, PWA |
+
+사진 글자 읽기는 RapidOCR(onnxruntime)로 글자 위치 찾기(PP-OCRv6_det_small) → 한국어 인식(korean_PP-OCRv5_rec_mobile) 순서로 돌립니다. 거꾸로(180도) 든 사진은 읽지 못합니다(이유는 `app/ocr.py` 맨 위). 서버는 실행 중에 모델을 내려받지 않습니다. 노트북에서 켜려면 저장소 루트에서 Dockerfile 의 `ADD` 줄과 같은 주소로 받고, `.env` 에 `OCR_MODEL_DIR=.ocr-models` 를 적습니다(`.ocr-models/` 는 저장소와 이미지에 올라가지 않습니다).
+
+```text
+mkdir .ocr-models
+curl -L -o .ocr-models/PP-OCRv6_det_small.onnx https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx
+curl -L -o .ocr-models/korean_PP-OCRv5_rec_mobile.onnx https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx
+```
+
+모델 파일이 있으면 `pytest` 가 일정표 사진(`data/samples/schedule.png`)을 실제로 읽어 보는 테스트도 돌립니다. 없으면 그 테스트만 건너뜁니다.
 
 ## 외부 API
 
