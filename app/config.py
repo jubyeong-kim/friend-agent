@@ -153,7 +153,7 @@ def load_settings():
         google_login=env_flag("GOOGLE_LOGIN", False),
         # 개발용 "이번 턴" 패널. production 에서는 기본으로 끈다.
         show_turn_panel=env_flag("SHOW_TURN_PANEL", env != "production"),
-        ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. tesseract 프로그램이 필요하다
+        ocr_enabled=env_flag("OCR_ENABLED", False),  # 사진 글자 읽기. 모델 파일이 필요하다(app/ocr.py)
         toss_client_key=toss_client,
         toss_secret_key=toss_secret,
         signup_daily_limit=max(0, int(os.environ.get("SIGNUP_DAILY_LIMIT", "").strip() or SIGNUP_DAILY_LIMIT)),

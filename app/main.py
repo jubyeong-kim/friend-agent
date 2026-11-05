@@ -17,6 +17,7 @@
 - /api/reminders/{id}/card.png: 약속 하나를 카드 그림으로(한글 글꼴이 필요하다)
 - /api/holidays: 달력에 칠할 공휴일
 """
+import asyncio
 import html
 import json
 import logging
@@ -30,6 +31,7 @@ from typing import Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -392,14 +394,22 @@ def greeting(user: User = Depends(current_user), model=Depends(get_llm)):
     return {"greeting": agent.greet(user.id, model, store)}
 
 
+ocr_turn = asyncio.Lock()  # 사진 글자 읽기는 한 번에 한 장. 여러 장을 같이 읽으면 메모리를 장 수만큼 더 쓴다
+
+
 @app.post("/api/ocr")
 async def read_photo(photo: UploadFile, user: User = Depends(current_user)):
     if not settings.ocr_enabled:
         raise HTTPException(404, "사진 글자 읽기가 꺼져 있습니다")
+    data = await photo.read()
     try:
-        return {"text": ocr.read_text(await photo.read())}
+        # 글자 읽기는 몇 초 걸리는 계산이다. 여기서 바로 돌리면 그동안 서버가 다른 요청(다른 사람의 채팅 답 등)을
+        # 하나도 처리하지 못하므로 따로(스레드에서) 돌리고, 끝날 때까지 기다리는 동안 다른 요청을 처리한다.
+        async with ocr_turn:
+            text = await run_in_threadpool(ocr.read_text, data)
     except ocr.OcrError as error:
         raise HTTPException(500, str(error)) from error
+    return {"text": text}
 
 
 def my_reply(uid, message_id):

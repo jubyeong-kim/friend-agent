@@ -68,7 +68,8 @@ jobs:
           env_vars: |
             COMMIT_SHA=${{ env.DEPLOY_COMMIT }}
             ENV=${{ vars.ENV }}
-          flags: --service-account=${{ vars.RUNTIME_SA }} --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=12,timeoutSeconds=2
+          # 메모리 1GiB: 사진 글자 읽기(app/ocr.py)가 사진 한 장에 서버 전체 최대 약 600MB 를 쓴다(로컬 Docker 측정). 기본값 512MiB 로는 모자란다
+          flags: --service-account=${{ vars.RUNTIME_SA }} --memory=1Gi --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=12,timeoutSeconds=2
           # 블루그린: 새 리비전은 트래픽 0%로 올리고 green 태그를 붙인다. tag 를 주면 url 출력은 서비스 주소가 아니라 태그 주소다.
           no_traffic: true
           tag: green
