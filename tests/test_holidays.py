@@ -14,12 +14,17 @@ from app.main import store
 
 KST = ZoneInfo("Asia/Seoul")
 FAKE = {
-    2025: [(date(2025, 12, 25), "크리스마스")],
+    # 2025 공개 자료: 어린이날과 부처님 오신 날이 같은 날인데 대체공휴일(5/6)이 없고, 아직 공휴일이 아니던 제헌절이 들어 있다
+    2025: [(date(2025, 5, 5), "어린이날"), (date(2025, 5, 5), "부처님 오신 날"), (date(2025, 7, 17), "제헌절"),
+           (date(2025, 12, 25), "크리스마스")],
     2026: [(date(2026, 1, 1), "새해"), (date(2026, 5, 5), "어린이날"), (date(2026, 9, 24), "추석"),
            (date(2026, 9, 25), "추석"), (date(2026, 9, 26), "추석"), (date(2026, 12, 25), "크리스마스")],
+    # 2027 공개 자료: 대체공휴일 8/16 을 '광복절', 5/3 을 '노동절'로 적었고, 성탄절(토) 대체공휴일 12/27 은 빠져 있다
     2027: [(date(2027, 1, 1), "새해"), (date(2027, 2, 6), "설날"), (date(2027, 2, 8), "설날"), (date(2027, 2, 9), "설날"),
-           (date(2027, 5, 5), "어린이날"), (date(2027, 6, 6), "현충일"), (date(2027, 9, 14), "추석"),
-           (date(2027, 9, 15), "추석"), (date(2027, 9, 16), "추석")],
+           (date(2027, 5, 3), "노동절"), (date(2027, 5, 5), "어린이날"), (date(2027, 6, 6), "현충일"),
+           (date(2027, 8, 16), "광복절"), (date(2027, 9, 14), "추석"), (date(2027, 9, 15), "추석"), (date(2027, 9, 16), "추석"),
+           (date(2027, 12, 25), "크리스마스")],
+    2028: [(date(2028, 1, 1), "새해")],
 }
 
 
@@ -59,9 +64,43 @@ def test_weekday_holiday_is_one_day_not_long_weekend():
     assert "5월 5일(수) 어린이날(하루 쉼)" in r.summary and "연휴" not in r.summary
 
 
-def test_weekend_holiday_says_it_overlaps():
+def test_weekend_holiday_without_substitute_says_so():
+    # 현충일 · 신정은 대체공휴일 대상이 아니다
     r = ask(**{"from": "2027-06-01", "to": "2027-06-30"})
-    assert "6월 6일(일) 현충일(주말과 겹침)" in r.summary and "연휴" not in r.summary
+    assert "6월 6일(일) 현충일(일요일이라 원래 쉬는 날, 대체공휴일 대상이 아니라 따로 더 쉬는 날은 없음)" in r.summary and "연휴" not in r.summary
+    new_year = ask(**{"from": "2028-01-01", "to": "2028-01-31"})
+    assert "1월 1일(토) 새해(토요일이라 원래 쉬는 날, 대체공휴일 대상이 아니라 따로 더 쉬는 날은 없음)" in new_year.summary
+
+
+def test_mislabeled_substitute_goes_back_to_real_date():
+    # 공개 자료의 '광복절 2027-08-16(월)'은 대체공휴일이다. 광복절은 8/15(일)
+    r = ask(**{"from": "2027-08-01", "to": "2027-08-31"})
+    assert "8월 15일(일) 광복절(대체공휴일 8월 16일(월), 주말과 이어 8월 14일(토)~8월 16일(월) 사흘 연휴)" in r.summary
+    assert "8월 16일(월) 광복절" not in r.summary
+
+
+def test_missing_substitute_is_added():
+    # 성탄절이 토요일이면 다음 첫 평일(월)이 대체공휴일인데 공개 자료에 없다
+    r = ask(**{"from": "2027-12-01", "to": "2027-12-31"})
+    assert "12월 25일(토) 크리스마스(대체공휴일 12월 27일(월), 주말과 이어 12월 25일(토)~12월 27일(월) 사흘 연휴)" in r.summary
+    # 기간이 성탄절에서 끝나도 같은 연휴의 대체공휴일을 말한다
+    short = ask(**{"from": "2027-12-20", "to": "2027-12-25"})
+    assert "대체공휴일 12월 27일(월)" in short.summary
+
+
+def test_two_holidays_on_one_day_get_a_substitute():
+    assert (date(2025, 5, 6), "어린이날 대체공휴일") in tools.korean_holidays(2025)
+
+
+def test_holiday_before_it_became_one_is_dropped():
+    assert all(n != "제헌절" for _, n in tools.korean_holidays(2025))
+
+
+def test_labor_day_substitute_is_left_unknown():
+    # 노동절(2026년부터 공휴일) 대체공휴일은 출처마다 달라 정하지 않는다. 공개 자료의 5/3 도 쓰지 않는다
+    r = ask(**{"from": "2027-05-01", "to": "2027-05-04"})
+    assert "5월 1일(토) 노동절(토요일이라 원래 쉬는 날, 대체공휴일은 출처마다 달라 확인 필요)" in r.summary
+    assert "5월 3일" not in r.summary
 
 
 def test_multi_day_holiday_is_one_long_weekend():
