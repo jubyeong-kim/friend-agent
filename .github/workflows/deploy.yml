@@ -13,6 +13,13 @@ permissions:
   contents: read
   id-token: write
 
+# 같은 가지(환경)의 배포는 한 번에 하나만 돈다. 연달아 머지하면 앞 배포가 끝날 때까지 기다린다.
+# 동시에 돌면 마지막 리비전이 green 이름표를 가져가 앞 배포들의 스모크 테스트가 실패한다(11/9 #63 · #64).
+# 기다리는 실행은 가장 최근 것 하나만 남고 나머지는 취소된다 — 최근 머지가 앞 머지를 모두 품으므로 괜찮다.
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
