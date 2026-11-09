@@ -140,6 +140,8 @@ def get_air_quality(args, ctx):
 
 
 _holiday_cache = {}
+# 연휴 일수는 우리말 수로 적는다. '3일'이라고 쓰면 날짜(3일)와 헷갈린다
+COUNT_WORDS = {2: "이틀", 3: "사흘", 4: "나흘", 5: "닷새", 6: "엿새", 7: "이레", 8: "여드레", 9: "아흐레", 10: "열흘"}
 
 
 def holidays_of(year):
@@ -150,23 +152,135 @@ def holidays_of(year):
     return _holiday_cache[year]
 
 
+def holidays_between(start, end):
+    found = []
+    for year in range(start.year, end.year + 1):
+        found += [(d, n) for d, n in holidays_of(year) if start <= d <= end]
+    return sorted(found)
+
+
+def is_day_off(d):
+    """주말이거나 공휴일이면 True. 이웃 연도 자료를 못 불러오면 주말만 본다(연휴 계산 때문에 답 전체가 실패하지 않게)."""
+    if d.weekday() >= 5:
+        return True
+    try:
+        return any(h == d for h, _ in holidays_of(d.year))
+    except httpx.HTTPError:
+        return False
+
+
+def day_off_block(d):
+    """d 가 들어 있는 쉬는 날 덩어리(주말과 공휴일이 이어진 날들)의 첫날과 마지막 날."""
+    first = last = d
+    for _ in range(14):
+        if not is_day_off(first - timedelta(days=1)):
+            break
+        first -= timedelta(days=1)
+    for _ in range(14):
+        if not is_day_off(last + timedelta(days=1)):
+            break
+        last += timedelta(days=1)
+    return first, last
+
+
+def holiday_groups(found):
+    """같은 연휴에 든 공휴일끼리 묶는다. 설날처럼 며칠이 한 연휴면 연휴를 한 번만 말하게."""
+    groups = []
+    for d, n in found:
+        block = day_off_block(d)
+        if groups and groups[-1]["block"] == block:
+            groups[-1]["days"].append((d, n))
+        else:
+            groups.append({"block": block, "days": [(d, n)]})
+    return groups
+
+
+def group_text(g):
+    """'12월 25일(금) 크리스마스(주말과 이어 12월 25일(금)~12월 27일(일) 사흘 연휴)'"""
+    first, last = g["block"]
+    length = (last - first).days + 1
+    dates = "·".join(dict.fromkeys(when.date_label(d) for d, _ in g["days"]))
+    names = "·".join(dict.fromkeys(n for _, n in g["days"]))
+    if length >= 3:
+        weekend = any((first + timedelta(days=i)).weekday() >= 5 for i in range(length))
+        rest = (f"{'주말과 이어 ' if weekend else ''}{when.date_label(first)}~{when.date_label(last)} "
+                f"{COUNT_WORDS.get(length, f'{length}일')} 연휴")
+    elif all(d.weekday() >= 5 for d, _ in g["days"]):
+        rest = "주말과 겹침"
+    else:
+        rest = f"{'하루' if length == 1 else '이틀'} 쉼"
+    return f"{dates} {names}({rest})"
+
+
+def holidays_text(found, limit=6):
+    """공휴일 목록 → (요약에 넣을 글, 화면용 연휴 목록)."""
+    groups = holiday_groups(found)
+    text = ", ".join(group_text(g) for g in groups[:limit])
+    rest = sum(len(g["days"]) for g in groups[limit:])
+    breaks = [{"from": g["block"][0].isoformat(), "to": g["block"][1].isoformat(),
+               "days": (g["block"][1] - g["block"][0]).days + 1} for g in groups]
+    return text + (f" 외 {rest}일" if rest else ""), breaks
+
+
+def holidays_after(day):
+    """day 다음에 처음 오는 공휴일(같은 연휴에 든 공휴일까지). 자료를 못 불러오면 빈 목록."""
+    try:
+        for year in (day.year, day.year + 1):
+            later = [(d, n) for d, n in sorted(holidays_of(year)) if d > day]
+            if later:
+                last = day_off_block(later[0][0])[1]
+                return [(d, n) for d, n in later if d <= last]
+    except httpx.HTTPError:
+        pass
+    return []
+
+
+def a_year_later(d):
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:  # 2월 29일
+        return d.replace(year=d.year + 1, day=28)
+
+
 def get_holidays(args, ctx):
+    """기간 안 공휴일과, 그 공휴일이 주말과 이어 며칠 연휴인지를 알려 준다.
+    staging 기준 측정(2026-11-09)에서 모델이 '다음 공휴일'을 2~3주만 조회해 '없음'을 받거나, '내년 1월 1일'을 올해 날짜로 조회했다.
+    그래서 기간에 공휴일이 없으면 그 뒤 첫 공휴일을, 기간이 이미 지났으면 1년 뒤 같은 기간을 함께 알려 준다.
+    결과에 '12월 25일(금)'만 있으면 답이 주말과 이어 사흘 쉰다는 것을 말하지 않아서, 연휴 일수는 코드가 센다."""
     today = when.now_in(ctx.timezone).date()
     try:
         start = date.fromisoformat(args.get("from") or today.isoformat())
         end = date.fromisoformat(args.get("to") or (today + timedelta(days=365)).isoformat())
     except ValueError:
         start, end = today, today + timedelta(days=365)
-    found = []
-    for year in range(start.year, end.year + 1):
-        found += [(d, n) for d, n in holidays_of(year) if start <= d <= end]
+    found = holidays_between(start, end)
+    text, breaks = holidays_text(found) if found else ("", [])
     data = {"from": start.isoformat(), "to": end.isoformat(),
-            "holidays": [{"date": d.isoformat(), "name": n} for d, n in found]}
-    if not found:
-        return ToolResult("get_holidays", True, f"{start}부터 {end}까지 공휴일이 없습니다.", data)
-    listed = ", ".join(f"{when.date_label(d)} {n}" for d, n in found[:6])
-    more = f" 외 {len(found) - 6}일" if len(found) > 6 else ""
-    return ToolResult("get_holidays", True, f"{start}~{end} 공휴일: {listed}{more}.", data)
+            "holidays": [{"date": d.isoformat(), "name": n} for d, n in found], "breaks": breaks}
+    if end < today:  # 지난 일을 묻는 질문도 있으므로 지난 기간 결과와 1년 뒤 결과를 둘 다 준다
+        start2, end2 = a_year_later(start), a_year_later(end)
+        past = f"그때 공휴일: {text}" if found else "그때 공휴일 없음"
+        try:
+            later = holidays_between(start2, end2)
+        except httpx.HTTPError:
+            # 공개 API 가 3초 넘게 걸린 적이 있다(로컬 확인 중 ReadTimeout). 덧붙이는 조회 때문에 지난 기간 결과까지 잃지 않게 한다
+            log("WARNING", "외부 도구 호출 실패", tool="get_holidays", error="a_year_later")
+            return ToolResult("get_holidays", True, f"{start}~{end}는 이미 지난 기간입니다({past}). "
+                                                    f"1년 뒤 같은 기간 {start2}~{end2} 공휴일은 지금 불러오지 못했습니다.", data)
+        later_text, later_breaks = holidays_text(later) if later else ("", [])
+        data["a_year_later"] = {"from": start2.isoformat(), "to": end2.isoformat(), "breaks": later_breaks,
+                                "holidays": [{"date": d.isoformat(), "name": n} for d, n in later]}
+        now_part = (f"1년 뒤 같은 기간 {start2}~{end2} 공휴일: {later_text}." if later
+                    else f"1년 뒤 같은 기간 {start2}~{end2}에도 공휴일이 없습니다.")
+        return ToolResult("get_holidays", True, f"{start}~{end}는 이미 지난 기간입니다({past}). {now_part}", data)
+    if found:
+        return ToolResult("get_holidays", True, f"{start}~{end} 공휴일: {text}.", data)
+    summary = f"{start}부터 {end}까지 공휴일이 없습니다."
+    if after := holidays_after(end):
+        after_text, after_breaks = holidays_text(after)
+        data["next"] = {"holidays": [{"date": d.isoformat(), "name": n} for d, n in after], "breaks": after_breaks}
+        summary += f" 그 뒤 첫 공휴일은 {after_text}입니다."
+    return ToolResult("get_holidays", True, summary, data)
 
 
 # ── 이동 시간 도구(카카오맵 REST API) ──────────────────────────────
