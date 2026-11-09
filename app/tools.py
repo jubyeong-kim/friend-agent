@@ -144,6 +144,19 @@ _holiday_cache = {}
 COUNT_WORDS = {2: "이틀", 3: "사흘", 4: "나흘", 5: "닷새", 6: "엿새", 7: "이레", 8: "여드레", 9: "아흐레", 10: "열흘"}
 
 
+# 날짜가 정해진 공휴일과 대체공휴일 규칙(관공서의 공휴일에 관한 규정, 2026년 기준. 뉴스 · 정리 글로 확인했고 법 원문은 보지 않았다).
+# 값: (월, 일, 대체 규칙, 공휴일이 된 해). 대체 규칙 "weekend" = 토 · 일과 겹치면, "weekend+" = 토 · 일이나 다른 공휴일과 겹치면
+# 다음 첫 평일이 대체공휴일. None = 대체공휴일 대상 아님. "unknown" = 출처마다 달라 정하지 않음(노동절).
+# 규칙이 생기기 전 해(성탄절은 2023년, 3·1절 등 국경일은 2021년부터)는 따로 다루지 않는다.
+FIXED_HOLIDAYS = {
+    "새해": (1, 1, None, None), "3·1절": (3, 1, "weekend", None), "노동절": (5, 1, "unknown", 2026),
+    "어린이날": (5, 5, "weekend+", None), "현충일": (6, 6, None, None), "제헌절": (7, 17, "weekend", 2026),
+    "광복절": (8, 15, "weekend", None), "개천절": (10, 3, "weekend", None), "한글날": (10, 9, "weekend", None),
+    "크리스마스": (12, 25, "weekend+", None),
+}
+SUBSTITUTE = " 대체공휴일"
+
+
 def holidays_of(year):
     if year not in _holiday_cache:
         r = httpx.get(f"https://date.nager.at/api/v3/PublicHolidays/{year}/KR", timeout=TIMEOUT)
@@ -152,10 +165,38 @@ def holidays_of(year):
     return _holiday_cache[year]
 
 
+def korean_holidays(year):
+    """공개 자료(holidays_of)를 대체공휴일 규칙으로 바로잡은 목록.
+    공개 자료는 대체공휴일을 원래 이름으로 적거나(2027-08-16 '광복절', 실제 광복절은 8/15 일요일) 빠뜨린다(2027-12-27 성탄절 대체).
+    날짜가 정해진 공휴일은 제 날짜로 되돌리고, 대체공휴일은 규칙으로 다시 계산해 '광복절 대체공휴일'처럼 이름 붙인다.
+    설날 · 추석 · 부처님 오신 날(음력)은 자료 그대로 쓴다. 임시공휴일은 자료에 없어 알 수 없다."""
+    days = set()
+    for d, n in holidays_of(year):
+        rule = FIXED_HOLIDAYS.get(n)
+        if rule is None:
+            days.add((d, n))
+        elif not rule[3] or year >= rule[3]:  # 공개 자료는 2024 · 2025 에도 제헌절을 넣었다(공휴일이 된 건 2026년부터)
+            days.add((date(year, rule[0], rule[1]), n))
+    days = sorted(days)
+    taken = {d for d, _ in days}
+    for d, n in list(days):
+        rule = FIXED_HOLIDAYS.get(n)
+        if not rule or rule[2] not in ("weekend", "weekend+"):
+            continue
+        if d.weekday() < 5 and not (rule[2] == "weekend+" and sum(1 for x, _ in days if x == d) > 1):
+            continue
+        sub = d + timedelta(days=1)
+        while sub.weekday() >= 5 or sub in taken:
+            sub += timedelta(days=1)
+        days.append((sub, n + SUBSTITUTE))
+        taken.add(sub)
+    return sorted(days)
+
+
 def holidays_between(start, end):
     found = []
     for year in range(start.year, end.year + 1):
-        found += [(d, n) for d, n in holidays_of(year) if start <= d <= end]
+        found += [(d, n) for d, n in korean_holidays(year) if start <= d <= end]
     return sorted(found)
 
 
@@ -164,7 +205,7 @@ def is_day_off(d):
     if d.weekday() >= 5:
         return True
     try:
-        return any(h == d for h, _ in holidays_of(d.year))
+        return any(h == d for h, _ in korean_holidays(d.year))
     except httpx.HTTPError:
         return False
 
@@ -196,20 +237,35 @@ def holiday_groups(found):
 
 
 def group_text(g):
-    """'12월 25일(금) 크리스마스(주말과 이어 12월 25일(금)~12월 27일(일) 사흘 연휴)'"""
+    """'12월 25일(토) 크리스마스(대체공휴일 12월 27일(월), 주말과 이어 12월 25일(토)~12월 27일(월) 사흘 연휴)'"""
     first, last = g["block"]
     length = (last - first).days + 1
-    dates = "·".join(dict.fromkeys(when.date_label(d) for d, _ in g["days"]))
-    names = "·".join(dict.fromkeys(n for _, n in g["days"]))
+    main = [(d, n) for d, n in g["days"] if not n.endswith(SUBSTITUTE)] or g["days"]  # 기간 안에 대체공휴일만 있으면 그 이름으로
+    dates = "·".join(dict.fromkeys(when.date_label(d) for d, _ in main))
+    names = "·".join(dict.fromkeys(n for _, n in main))
+    notes = []
+    try:  # 기간 끝에 걸려 목록에 없는 대체공휴일도 같은 연휴면 말한다
+        subs = [d for d, n in holidays_between(first, last) if n.endswith(SUBSTITUTE) and (d, n) not in main]
+    except httpx.HTTPError:
+        subs = [d for d, n in g["days"] if n.endswith(SUBSTITUTE) and (d, n) not in main]
+    if subs:
+        notes.append("대체공휴일 " + "·".join(when.date_label(d) for d in subs))
     if length >= 3:
         weekend = any((first + timedelta(days=i)).weekday() >= 5 for i in range(length))
-        rest = (f"{'주말과 이어 ' if weekend else ''}{when.date_label(first)}~{when.date_label(last)} "
-                f"{COUNT_WORDS.get(length, f'{length}일')} 연휴")
-    elif all(d.weekday() >= 5 for d, _ in g["days"]):
-        rest = "주말과 겹침"
+        notes.append(f"{'주말과 이어 ' if weekend else ''}{when.date_label(first)}~{when.date_label(last)} "
+                     f"{COUNT_WORDS.get(length, f'{length}일')} 연휴")
+    elif all(d.weekday() >= 5 for d, _ in main):
+        # '주말과 겹침, 대체공휴일 대상 아님'만 적었더니 답이 '그날은 쉬지 못할 것 같아'로 읽었다(로컬 확인). 원래 쉬는 날임을 먼저 말한다
+        weekdays = "·".join(dict.fromkeys(f"{when.WEEKDAYS[d.weekday()]}요일" for d, _ in main))
+        notes.append(f"{weekdays}이라 원래 쉬는 날")
+        rules = {FIXED_HOLIDAYS[n][2] for _, n in main if n in FIXED_HOLIDAYS}
+        if "unknown" in rules:
+            notes.append("대체공휴일은 출처마다 달라 확인 필요")
+        elif rules == {None}:
+            notes.append("대체공휴일 대상이 아니라 따로 더 쉬는 날은 없음")
     else:
-        rest = f"{'하루' if length == 1 else '이틀'} 쉼"
-    return f"{dates} {names}({rest})"
+        notes.append(f"{'하루' if length == 1 else '이틀'} 쉼")
+    return f"{dates} {names}({', '.join(notes)})"
 
 
 def holidays_text(found, limit=6):
@@ -226,7 +282,7 @@ def holidays_after(day):
     """day 다음에 처음 오는 공휴일(같은 연휴에 든 공휴일까지). 자료를 못 불러오면 빈 목록."""
     try:
         for year in (day.year, day.year + 1):
-            later = [(d, n) for d, n in sorted(holidays_of(year)) if d > day]
+            later = [(d, n) for d, n in korean_holidays(year) if d > day]
             if later:
                 last = day_off_block(later[0][0])[1]
                 return [(d, n) for d, n in later if d <= last]
