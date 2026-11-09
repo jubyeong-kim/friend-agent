@@ -1,10 +1,159 @@
-# AI 친구 에이전트 서비스
+<div align="center">
 
-사용자가 정한 캐릭터가 이전 대화와 사용자에 대해 기억한 것을 바탕으로 대화하는 에이전트 서비스입니다.
+# 🌤️ 하루친구 · AI 친구 에이전트
 
-- 필요하면 도구를 골라 쓴 뒤 답합니다. 날씨, 미세먼지, 공휴일, 대중교통 이동 시간을 찾고 약속을 저장합니다.
-- "목요일 아침에 우산 챙기라고 알려 줘"처럼 부탁한 약속은 때가 되면 친구가 먼저 말을 걸어 전합니다.
-- 화면과 API를 FastAPI 하나가 함께 제공하는 단일 서비스입니다. 배포와 운영 실습의 예시 코드로 씁니다.
+**내가 만든 캐릭터가 나를 기억하고, 필요하면 도구를 찾아 쓰고, 약속한 때가 되면 먼저 말을 거는 친구**
+
+<br/>
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![OpenAI](https://img.shields.io/badge/gpt--4o--mini-답_모델-412991?style=for-the-badge&logo=openai&logoColor=white)
+<br/>
+![Cloud Run](https://img.shields.io/badge/Cloud_Run-us--central1-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-Auth_·_DB-3FCF8E?style=for-the-badge&logo=supabase&logoColor=white)
+![Langfuse](https://img.shields.io/badge/Langfuse-트레이스-0A0A0A?style=for-the-badge)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI_·_배포-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
+
+![tests](https://img.shields.io/badge/테스트-205_통과-2ea44f?style=flat-square)
+![score](https://img.shields.io/badge/15번_개선_총합-82.4_→_87.8-2ea44f?style=flat-square)
+![safety](https://img.shields.io/badge/안전-77.1_→_91.7-2ea44f?style=flat-square)
+![tool](https://img.shields.io/badge/도구_결과_쓰기-63.3_→_88.3-2ea44f?style=flat-square)
+
+</div>
+
+<br/>
+
+> [!IMPORTANT]
+> **📋 채점하시는 분께** — 15번 실습 「로그와 피드백으로 에이전트 개선하기」의 보고서는 **[REPORT.md](REPORT.md)** 입니다.
+> 아래 표에서 보고 싶은 내용으로 바로 갈 수 있습니다.
+
+| 보고 싶은 것 | 바로 가기 |
+| --- | --- |
+| 🔎 문제 후보 8개와 근거 트레이스 · 반복 횟수 | [REPORT 3장](REPORT.md#3-처음-잰-결과와-문제-후보) |
+| ⚖️ 빈도 · 영향 · 비용으로 하나씩 고른 과정 | [REPORT 4장](REPORT.md#4-무엇을-먼저-고쳤나) |
+| 🧪 문제 문장 · 정상 문장으로 잰 전후 비교 | [REPORT 5장](REPORT.md#5-고치기와-전후-비교) |
+| 🔁 배포 뒤 새 대화를 version(리비전)별로 다시 잰 결과 | [REPORT 6장](REPORT.md#6-고친-뒤-다시-재기) |
+| 🖼️ 트레이스 캡처로 보는 고치기 전 · 후와 version | [REPORT 6-7](REPORT.md#6-7-트레이스로-보는-전후) · [그림 폴더](docs/report-15) |
+| 🧑‍⚖️ 심사 모델을 얼마나 믿을 수 있나 · 남은 문제 | [REPORT 7장](REPORT.md#7-심사-모델을-얼마나-믿을-수-있나) · [8장](REPORT.md#8-남은-문제) |
+| 🛠️ 고친 코드 | [#54](https://github.com/jubyeong-kim/friend-agent/pull/54) · [#55](https://github.com/jubyeong-kim/friend-agent/pull/55) · [#56](https://github.com/jubyeong-kim/friend-agent/pull/56) · [#58](https://github.com/jubyeong-kim/friend-agent/pull/58) · [#59](https://github.com/jubyeong-kim/friend-agent/pull/59) |
+
+---
+
+## ✨ 하루친구가 하는 일
+
+| | 기능 | 설명 |
+| :---: | --- | --- |
+| 💬 | **캐릭터 대화** | 사용자가 정한 캐릭터가 답합니다. 답은 다 만들어지기 전부터 조금씩 흘러나옵니다(스트리밍) |
+| 🧠 | **기억 3층** | 최근 대화 10턴 · 대화 요약 · 기억 메모를 함께 보고 답합니다. 메모는 답을 보낸 뒤 고쳐 씁니다 |
+| 🧰 | **도구 7개** | 날씨 · 미세먼지 · 공휴일 · 대중교통 이동 시간 · 약속 저장 · 보기 · 취소 |
+| ⏰ | **먼저 말 걸기** | 「목요일 아침에 우산 챙기라고 알려 줘」처럼 부탁한 약속은, 때가 된 뒤 앱을 열면 친구가 먼저 꺼냅니다 |
+| 🛡️ | **안전장치** | 위기 낱말 규칙과 모델 위험 판정 둘로 살피고, 위험하면 캐릭터와 상관없이 정해진 안전 답을 보냅니다 |
+| 📊 | **관측** | 턴마다 Langfuse 트레이스를 남깁니다. version 칸에 Cloud Run 리비전 이름을 적어, 어느 배포가 답했는지 알 수 있습니다 |
+
+---
+
+## 🧩 한 턴은 이렇게 흘러갑니다
+
+```mermaid
+flowchart TD
+    U(["💬 사용자 메시지"]) --> K{"① 위기 낱말이 있나?"}
+    K -- 예 --> SAFE["🛡️ 정해진 안전 답"]
+    K -- 아니오 --> PAR
+
+    subgraph PAR ["동시에 돌림"]
+        direction LR
+        R["② 위험 판정<br/>직전 대화까지 보고 판단"]
+        C["③ 도구 선택<br/>도구 · 인자 · 확신값"]
+    end
+
+    R -- 위험 --> SAFE
+    C --> FIX["확신값 위치 바로잡기<br/>말로 한 날짜 다시 셈"]
+    FIX --> Q{"확신값 0.6 이상?"}
+    Q -- 아니오 --> ASK["❓ 도구 없이 되묻기"]
+    Q -- 예 --> T["④ 도구 실행<br/>날씨 · 미세먼지 · 공휴일 · 이동 시간 · 약속"]
+    T --> A["⑤ 답 생성 · 스트리밍"]
+    ASK --> A
+    A --> M["⑥ 기억 메모 · 대화 요약 고쳐 쓰기"]
+
+    classDef safe fill:#ffe3e3,stroke:#e03131,color:#000
+    classDef step fill:#e7f5ff,stroke:#1c7ed6,color:#000
+    classDef new fill:#fff3bf,stroke:#f08c00,color:#000
+    class SAFE safe
+    class T,A,M step
+    class R,FIX new
+```
+
+<sub>🟨 노란 칸은 15번 실습에서 더한 단계입니다(PR #54 · #56 · #58). 모델은 한 턴에 네 번 부릅니다: 위험 판정 · 도구 선택 · 답 · 기억 정리.</sub>
+
+---
+
+## 📈 15번 실습: 로그로 찾고, 고치고, 다시 재기
+
+```mermaid
+flowchart LR
+    A["📥 로그 만들기<br/>시험 대화 124턴"] --> B["📊 점수 매기기<br/>7개 분야 · 26개 항목"]
+    B --> C["🔎 문제 고르기<br/>빈도 · 영향 · 비용"]
+    C --> D["🛠️ 고치기<br/>PR #54 ~ #59"]
+    D --> E["🔁 배포 뒤 다시 재기<br/>version별 비교"]
+    E -. 다음 문제 .-> B
+```
+
+| 분야 | 고치기 전 | 고친 뒤 | 변화 |
+| --- | :---: | :---: | :---: |
+| 🛡️ 안전 | 77.1 | **91.7** | 🟢 +14.6 |
+| 🧭 도구 선택 | 69.2 | **72.2** | 🟢 +3.0 |
+| 🧰 도구 결과 쓰기 | 63.3 | **88.3** | 🟢 +25.0 |
+| 🎭 답 · 캐릭터 | 91.7 | 91.7 | ⚪ 0 |
+| 🧠 기억 | 100 | 88.3 | 🔴 −11.7 |
+| 👋 첫 인사 | 100 | 100 | ⚪ 0 |
+| ⚙️ 운영 | 75.8 | **82.7** | 🟢 +6.9 |
+| **총합** | **82.4** | **87.8** | **🟢 +5.4** |
+
+| 고친 문제 | PR | 결과 |
+| --- | :---: | --- |
+| 도구 선택 출력이 깨져 맞는 도구를 버림 | #54 | 깨진 3개를 모두 바르게 읽음 · 정상 42개 그대로 |
+| 연휴를 놓친 답 | #55 · #59 | 3번 중 0번 → 3번 중 2번 통과 |
+| 말로 한 날짜를 틀리게 넣고도 확신함 | #56 | 틀린 날짜로 도구 실행 11번 → 0번 |
+| 낱말 없이 이어지는 위기 질문에 답함 | #58 | 6번 중 4번 → 6번 모두 막음 |
+
+> [!NOTE]
+> 대신 **턴당 비용이 13% 올랐고**(위험 판정 호출), 일상 문장 2개를 위기로 잘못 막았습니다. 기억 점수가 내려간 원인은 아직 확인하지 못했습니다. 자세한 내용은 [REPORT 6장 · 8장](REPORT.md#6-고친-뒤-다시-재기)에 있습니다.
+
+---
+
+## 🚀 배포는 이렇게 흘러갑니다
+
+```mermaid
+flowchart LR
+    PR["🔀 PR"] --> CI["✅ CI 테스트"]
+    CI --> STG["staging 가지에 머지"]
+    STG --> GA["⚙️ GitHub Actions<br/>테스트 → 이미지 빌드 → 배포"]
+    GA --> CR["☁️ Cloud Run staging<br/>새 리비전"]
+    CR --> LF["📊 Langfuse<br/>version = 리비전 이름"]
+    STG -. 확인 뒤 .-> MAIN["main 가지에 머지"]
+    MAIN --> PROD["☁️ Cloud Run production"]
+```
+
+---
+
+## 🗂️ 폴더 한눈에
+
+| 경로 | 내용 |
+| --- | --- |
+| `app/` | 서버 코드. 한 턴 흐름은 `agent.py`, 도구 선택은 `router.py`, 도구는 `tools.py`, 안전은 `safety.py` |
+| `static/index.html` | 화면: 대화 · 캐릭터 설정 · 기억과 약속 · 개발용 「이번 턴」 패널 |
+| `tests/` | 가짜 응답으로 돌리는 테스트 205개(비용 없음) |
+| `data/eval/` · `scripts/` | 평가 데이터와 평가 · 운영 스크립트 |
+| `docs/` | 운영 절차 · 배포 권한 · Supabase 연결 · 카나리 기준 |
+| `REPORT.md` | 15번 실습 보고서 |
+
+<br/>
+
+<details>
+<summary><b>📦 저장소 만들기 · 실행 · 환경변수 · 배포 · 외부 API 자세히 보기 (펼치기)</b></summary>
+
+<br/>
 
 ## 저장소 만들기
 
@@ -20,6 +169,7 @@ cd <저장소 이름>
 ```text
 사용자 메시지
  ① 안전장치   위기 표현이면 캐릭터 설정과 상관없이 정해진 안전 응답 (코드 규칙)
+              ②와 동시에 모델이 직전 대화까지 보고 위험을 한 번 더 판정. 위험하면 같은 안전 응답
  ② 도구 선택  모델이 도구(약속 저장 최대 5개, 다른 도구 최대 2개)와 인자, 확신도, 이유를 JSON으로 고름
               확신도 0.6 미만이면 도구 없이 되묻기. 모델이 없거나 실패하면 키워드 규칙
  ③ 도구 실행  날씨, 미세먼지, 공휴일(키 없는 공개 API), 이동 시간(카카오맵, 키 필요), 약속 저장, 보기, 취소
@@ -29,7 +179,7 @@ cd <저장소 이름>
 
 **⑤를 응답 뒤 백그라운드로 돌리지 않는 이유:** Cloud Run 기본 설정(요청 기반 과금)에서는 응답을 보낸 뒤 CPU가 거의 주어지지 않습니다. 그래서 응답을 닫기 전에 처리합니다.
 
-**호출 횟수와 비용:** 한 턴에 모델을 세 번 부릅니다(도구 선택, 답, 기억 정리). 메시지 한 건의 원가를 계산할 때 세 번을 모두 셉니다.
+**호출 횟수와 비용:** 한 턴에 모델을 네 번 부릅니다(위험 판정, 도구 선택, 답, 기억 정리). 메시지 한 건의 원가를 계산할 때 네 번을 모두 셉니다.
 
 ## 구성
 
@@ -180,4 +330,8 @@ curl -L -o .ocr-models/korean_PP-OCRv5_rec_mobile.onnx https://www.modelscope.cn
 
 공개 지오코딩 API는 한국어 지명을 잘못 찾는 경우가 있어서, 지원 도시 26곳의 좌표를 `app/tools.py` 에 직접 적어 두었습니다.
 
-이 저장소는 jubyeong-kim 이 Cloud Run 배포 실습용으로 만들었다.
+</details>
+
+<br/>
+
+<sub>이 저장소는 jubyeong-kim 이 Cloud Run 배포 실습용으로 만들었다.</sub>
