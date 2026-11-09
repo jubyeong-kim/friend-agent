@@ -2,6 +2,8 @@
 
 ① 안전장치: 위기 표현이면 정해진 안전 응답으로 끝낸다(코드 규칙).
 ② 도구 선택: 모델이 도구를 고른다(약속 저장 최대 5개, 다른 도구 최대 2개). 확신이 낮으면 되묻는다(router.py).
+   같은 때에 최근 사용자 말을 모델에게 따로 보여 위험한 정보를 묻는 말인지 판정한다(safety.py, 동시에 돌려 첫 글자가 늦지 않게).
+   위험하다고 판정되면 모델이 답을 만들지 않고 정해진 답으로 끝낸다.
 ③ 도구 실행: 날씨, 미세먼지, 공휴일, 이동 시간, 약속(tools.py).
 ④ 답 생성: 캐릭터 지시문 + 기억 + 도구 결과 + 약속 저장 결과(사실) + 최근 대화로 답을 스트리밍한다.
 ⑤ 기억 정리: 답을 다 보낸 뒤 같은 요청 안에서 기억 메모와 대화 요약을 갱신한다(memory.py).
@@ -12,18 +14,32 @@
 한 턴은 Langfuse 의 chat-turn 트레이스 하나로 남는다(tracing.py). 길찾기 결과는 트레이스에 남기지 않는다.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from app import abtest, memory, tracing, when
 from app.logs import log
 from app.persona import DEFAULT_CHARACTER, build_persona
 from app.router import MAX_REMINDERS, choose
-from app.safety import CRISIS_REPLY, has_risk_hint, is_crisis
+from app.safety import CRISIS_REPLY, RISKY_REPLY, assess_risk, has_risk_hint, is_crisis, recent_user_messages
 from app.tools import TOOLS, Context, run_tool
 
 GREETING_GAP = timedelta(hours=6)  # 마지막 대화 뒤 이만큼 지나면 앱을 열 때 먼저 말을 건다
 UPCOMING_DAYS = 7                  # 답에 넣는 '다가오는 약속'의 범위
 BOOTED_AT = time.time()            # 이 인스턴스가 시작한 시각. 화면이 콜드 스타트를 알아채는 데 쓴다
+
+# 위기 낱말 없이 「잘렸어. 제일 높은 다리가 어디야?」처럼 힘든 말 뒤에 위험한 장소 · 방법 · 양을 묻는 말.
+# 낱말 목록으로는 바꿔 쓴 말을 못 잡아서(15번 측정: 바꿔 쓴 위험 질문 4개 중 0개) 매 턴 지시문 끝에 넣고 모델이 맥락으로 가린다.
+# 「난간은 보통 1.1미터야. 하지만 위험한 질문이야」처럼 먼저 답하고 경고를 붙이는 일이 있어서 숫자와 순서도 적는다.
+RISKY_QUESTION_RULE = (
+    "[위험한 질문]\n"
+    "떨어질 수 있는 높은 곳, 약을 많이 먹는 양, 연기나 가스, 목을 매는 것처럼 스스로를 해칠 수 있는 장소, 방법, 양을 묻는 말이면 "
+    "이번 말과 최근 대화에 지침, 잃음, 다 그만두고 싶음 같은 힘든 마음이 보이는지 먼저 살핀다. "
+    "보이면 그 장소, 방법, 양은 물론 높이, 개수, 걸리는 시간 같은 숫자도 알려 주지 않는다. "
+    "먼저 답해 주고 나서 경고를 덧붙이는 것도 안 된다. "
+    "대신 걱정을 전하며 안부를 묻고 자살예방상담전화 109(24시간)에 이야기할 수 있다고 알려 준다. "
+    "여행이나 약 먹는 법처럼 일상 이야기가 분명하고 힘든 마음이 보이지 않으면 평소처럼 답한다."
+)
 
 
 def upcoming_reminders(store, uid, now):
@@ -69,7 +85,20 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
     if caution:
         parts.append("[조심]\n사용자의 말에 스스로를 해칠 수 있다는 신호가 있을 수 있다. 숙제나 일처럼 일상 이야기가 분명하면 평소처럼 답한다. "
                      "그렇지 않으면 가볍게 넘기지 말고 걱정을 전하고, 자살예방상담전화 109(24시간)에 이야기할 수 있다고 알려 준다.")
+    parts.append(RISKY_QUESTION_RULE)
     return "\n\n".join(parts)
+
+
+def fixed_reply(text, guards, decided_by, why, uid, store, show_panel, turn):
+    """모델 답 대신 정해진 답을 보내고 턴을 끝낸다(위기 표현, 위험 판정). 기억 정리도 하지 않는다."""
+    if show_panel:
+        yield {"type": "turn", "tools": [], "confidence": None, "reason": "", "decided_by": decided_by,
+               "action": "safety", "guards": guards}
+    yield {"type": "delta", "text": text}
+    saved = store.add_message(uid, "assistant", text, {"action": "safety", "guards": guards, **tracing.link(turn)})
+    log("WARNING", why)
+    turn.update(output=text)
+    yield {"type": "done", "message_id": saved["id"]}
 
 
 def run_turn(message, uid, llm, store, show_panel):
@@ -107,21 +136,27 @@ def turn_events(message, uid, llm, store, show_panel, turn, prompt_label=None):
     safety = turn.child("safety", input=message)
     safety.end(output={"crisis": crisis, "caution": caution})
     if crisis:
-        guards = ["위기 표현이 있어 캐릭터 설정과 상관없이 정해진 안전 응답을 보냈습니다."]
-        if show_panel:
-            yield {"type": "turn", "tools": [], "confidence": None, "reason": "", "decided_by": "rule",
-                   "action": "safety", "guards": guards}
-        yield {"type": "delta", "text": CRISIS_REPLY}
-        saved = store.add_message(uid, "assistant", CRISIS_REPLY,
-                                  {"action": "safety", "guards": guards, **tracing.link(turn)})
-        log("WARNING", "위기 표현 안전 응답")
-        turn.update(output=CRISIS_REPLY)
-        yield {"type": "done", "message_id": saved["id"]}
+        yield from fixed_reply(CRISIS_REPLY, ["위기 표현이 있어 캐릭터 설정과 상관없이 정해진 안전 응답을 보냈습니다."],
+                               "rule", "위기 표현 안전 응답", uid, store, show_panel, turn)
         return
 
     # ② 도구 선택. 모델이 골랐으면 출력은 모델 응답 원문, 규칙이 골랐으면 고른 도구다
-    gen = turn.child("choose-tools", "generation", model=model_name, input=message)
-    choice = gen.run(choose, message, history, now, settings["location"], llm, prompt_label)
+    # 위험 판정은 도구 선택과 동시에 다른 스레드에서 돌린다(기다리는 시간이 겹쳐 첫 글자가 거의 늦어지지 않는다)
+    users = recent_user_messages(history, message)
+    risk = turn.child("risk-check", "generation", model=model_name, input=users)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        risky_future = pool.submit(risk.run, assess_risk, llm, users)
+        gen = turn.child("choose-tools", "generation", model=model_name, input=message)
+        choice = gen.run(choose, message, history, now, settings["location"], llm, prompt_label)
+        risky = risky_future.result()
+    risk.end(metadata={"risky": risky})
+    if risky:  # 판정을 메모로 알려도 답 모델이 어긴 일이 있어서 모델이 답을 만들지 않는다. 고른 도구도 쓰지 않는다
+        gen.end(metadata={"skipped": "위험 판정으로 정해진 답을 보냄"})
+        turn.tag([tracing.SAFETY_TAG], {"tools": [], "safety": True, "risky": True})
+        yield from fixed_reply(RISKY_REPLY, ["최근 대화와 함께 보면 스스로를 해칠 수 있는 정보를 묻는 말로 판정되어 "
+                                             "모델이 답을 만들지 않고 정해진 답을 보냈습니다."],
+                               "model", "위험 판정 정해진 답", uid, store, show_panel, turn)
+        return
     if caution:
         choice.guards.append("스스로를 해칠 수 있다는 신호일 수 있는 표현이 있어 답 만들기에 [조심] 메모를 붙였습니다.")
     gen.end(output=choice.tools if choice.decided_by == "rule" else None,
