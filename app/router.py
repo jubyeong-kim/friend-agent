@@ -307,7 +307,7 @@ def keep_written_date(args, message, now, guards):
 # 그래서 메시지의 날짜 말을 코드가 따로 셈해 모델이 넣은 날짜와 견주고, 다르면 코드가 셈한 날짜로 고친다.
 DAY_EXPR = re.compile(r"내일\s*모레|그저께|어제|오늘|내일|모레|글피|[월화수목금토일]요일")
 DAY_BEFORE = re.compile(r"전날|하루\s*전")
-# 코드가 셈하지 않는 날짜 말. 이런 말이 있으면 견주지 않는다(틀리게 셈해 맞는 턴까지 되묻지 않게)
+# 코드가 셈하지 않는 날짜 말. 이런 말이 있으면 견주지 않는다(틀리게 셈해 맞는 날짜까지 바꾸지 않게)
 NOT_COUNTED = re.compile(r"다음\s*날|이튿날|이틀|사흘|나흘|\d+\s*일\s*(전|뒤|후)|주말|지난\s*주|저번\s*주|다다음|\d{1,2}\s*월|\d{1,2}\s*일(?!요일)")
 DATE_FIELDS = {"get_weather": "date", "get_air_quality": "date", "create_reminder": "due_at"}
 
