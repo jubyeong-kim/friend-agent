@@ -4,6 +4,8 @@
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
    메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
    '다음 주 금요일' 같은 날짜 말과 다른 날짜를 넣으면 코드가 셈한 날짜로 고친다(모델 확신값은 틀릴 때도 0.9 이상이었다).
+   '다음 공휴일'처럼 기간을 말하지 않고 다음 공휴일을 물으면 모델이 좁게 잡은 기간을 비워 앞으로 1년을 보게 한다.
+   앞 대화 없이 '그날 비 와?'처럼 가리키는 날을 알 수 없으면 날짜를 짐작하지 않고 되묻는다.
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 지시문은 Langfuse 프롬프트 router-prompt 의 라벨 버전을 쓰고, 계측이 꺼졌거나 가져오지 못하면 코드의 ROUTER_TEMPLATE 을 쓴다.
 """
@@ -94,6 +96,7 @@ class ToolChoice:
     action: str = "answer"               # answer, clarify
     guards: list = field(default_factory=list)
     dropped: list = field(default_factory=list)  # 한도를 넘어 쓰지 않은 도구. 답이 처리하지 못했다고 말하게 한다
+    ask: str = ""                        # 되물을 때 무엇을 모르는지. 비면 답이 무엇을 물을지 스스로 정한다
 
 
 # ── 키워드 규칙 ─────────────────────────────────────────────────────
@@ -222,6 +225,7 @@ def model_choose(message, history, now, location, llm, label=None):
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
                     result.guards.append(f"{t['name']} 의 {key} 연도가 지난 연도라 {now.year}년으로 고쳤습니다.")
+    widen_next_holiday(result.tools, message, result.guards)
 
     # 안전장치: 같은 도구를 같은 인자로 두 번 고르면 하나만 남긴다. 이동 시간은 인자가 달라도 하나로 합친다
     # (실습에서 출발 시각용, 도착 시각용으로 나눠 두 번 골라 카드가 두 장 나왔다)
@@ -260,6 +264,31 @@ def fix_route_clock(args, message, now, guards):
         if got is None or (abs((got - now).total_seconds()) < 300 and got != datetime.fromisoformat(said)):
             args[key] = said
             guards.append(f"get_route 의 {key} 를 메시지에 나온 시각 {said[11:16]}(으)로 고쳤습니다.")
+
+
+# '다음 공휴일', '제일 가까운 빨간 날'처럼 기간을 말하지 않고 다음에 오는 것을 묻는 말
+NEXT_HOLIDAY = re.compile(r"(다음|가장\s*가까운|제일\s*가까운|다가오는|돌아오는)\s*(공휴일|휴일|빨간\s*날|쉬는\s*날|연휴)")
+# 기준이 되는 때나 기간을 말했으면 모델이 정한 기간을 그대로 둔다('크리스마스 다음 공휴일', '12월에 다음 연휴', '그 다음 공휴일')
+HOLIDAY_PERIOD = re.compile(r"\d{1,2}\s*월|\d{1,2}\s*일(?!요일)|(이번|다음|다다음|지난|저번)\s*(주|달)|올해|내년|작년|연말|연초"
+                            r"|크리스마스|성탄|설날|추석|그\s*다음|이후|지나고|부터")
+
+
+def widen_next_holiday(tools, message, guards):
+    """'다음 공휴일 언제야?'처럼 기간을 말하지 않고 다음 공휴일을 물으면 get_holidays 기간을 비워 앞으로 1년을 보게 한다.
+
+    15번 staging 측정(11/9)에서 모델이 '다음 공휴일'을 11/9 ~ 11/22 처럼 2 ~ 3주만 조회했다(확신값 0.9). 다음 공휴일 12/25 가
+    기간 밖이었고, 같은 문장을 5번 보내면 기간을 둘로 쪼개 고르기도 해 도구 선택이 흔들렸다.
+    비운 기간은 공휴일 도구가 오늘부터 1년으로 읽는다. 둘로 쪼개 고른 것은 같은 인자가 되어 뒤에서 하나로 합쳐진다.
+    """
+    if not NEXT_HOLIDAY.search(message) or HOLIDAY_PERIOD.search(message):
+        return
+    picked = [t for t in tools if t["name"] == "get_holidays" and t["args"]]
+    if not picked:
+        return
+    ranges = ", ".join(f"{t['args'].get('from', '')} ~ {t['args'].get('to', '')}" for t in picked)
+    for t in picked:
+        t["args"] = {}
+    guards.append(f"기간을 말하지 않고 다음 공휴일을 묻는 말이라 get_holidays 기간({ranges})을 비워 앞으로 1년을 봅니다.")
 
 
 MIDNIGHT = re.compile(r"자정|밤\s*12\s*시")
@@ -386,6 +415,25 @@ def limit_tools(tools, guards):
     return kept, dropped
 
 
+# '그날 · 그때'처럼 앞에서 말한 날을 가리키는 말('그 날씨', '그 때문에'는 아니다)
+POINTED_DAY = re.compile(r"그\s*날(?!씨)|그\s*때(?!문)")
+# 가리킬 날짜가 메시지 안에 있는지 보는 날짜 말(셈하지 않는 말도 날짜로 친다)
+DAY_WORDS = re.compile(DAY_EXPR.pattern + "|" + NOT_COUNTED.pattern +
+                       r"|(이번|다음)\s*(주|달)|올해|내년|연말|연초|새해|크리스마스|성탄|설날|추석")
+DATED_TOOLS = {"get_weather", "get_air_quality", "get_holidays", "create_reminder"}
+
+
+def pointed_day_unknown(tools, message, history):
+    """앞 대화가 없는데 '그날 · 그때'가 가리킬 날짜가 메시지에도 없고, 날짜가 필요한 도구를 골랐으면 True.
+
+    15번 staging 재측정(11/9)에서 앞 대화 없이 '그날 비 와?'를 보냈더니 모델이 그날을 오늘로 정해 날씨를 조회했다(확신값 0.9).
+    앞 대화가 있으면 모델이 거기서 날짜를 찾으므로 건드리지 않는다.
+    """
+    if history or not POINTED_DAY.search(message) or DAY_WORDS.search(message):
+        return False
+    return any(t["name"] in DATED_TOOLS for t in tools)
+
+
 def choose(message, history, now, location, llm, label=None):
     if getattr(llm, "can_reason", False):
         try:
@@ -411,8 +459,16 @@ def choose(message, history, now, location, llm, label=None):
         result.confidence = CONFIDENCE_THRESHOLD
         result.guards.append("약속을 묻는 말이라 되묻지 않고 약속 목록을 봅니다.")
 
+    # 안전장치: 앞 대화 없이 '그날 비 와?'처럼 가리키는 날을 알 수 없으면 오늘로 짐작하지 않고 되묻는다.
+    # 확신도는 모델 값 그대로 둔다(확신이 높아도 코드가 되물었다는 것이 기록에 남게)
+    if result.action == "answer" and pointed_day_unknown(result.tools, message, history):
+        result.action = "clarify"
+        result.ask = f"메시지의 '{POINTED_DAY.search(message).group(0)}' 가 가리키는 날짜(어느 날인지 물어본다)"
+        result.guards.append("'그날 · 그때'가 가리키는 날짜가 메시지에도 앞 대화에도 없어 도구를 쓰지 않고 되묻습니다.")
+        result.tools, result.dropped = [], []
+
     # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
-    if result.confidence < CONFIDENCE_THRESHOLD:
+    if result.action == "answer" and result.confidence < CONFIDENCE_THRESHOLD:
         result.action = "clarify"
         result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
         result.tools, result.dropped = [], []

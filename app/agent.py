@@ -81,7 +81,8 @@ def system_prompt(character, now, location, memories, summary, tool_lines=(), cl
                      "\n'방금 저장함'에 없는 약속은 저장했다거나 저장하겠다고 말하지 않는다. 저장하지 못한 약속은 못 했다고 말하고, "
                      "이유가 지난 시각이면 이미 지난 일정이라고 말한다. 저장한 약속은 위에 적힌 날짜와 시각 그대로 말한다.")
     if clarify:
-        parts.append("[되묻기]\n사용자가 무엇을 원하는지 확실하지 않다. 짧게 되물어서 확인한다.")
+        parts.append("[되묻기]\n사용자가 무엇을 원하는지 확실하지 않다. 짧게 되물어서 확인한다." +
+                     (f"\n모르는 것: {clarify}. 모른다거나 도구를 못 쓴다고 하지 말고 이것을 물어본다." if isinstance(clarify, str) else ""))
     if caution:
         parts.append("[조심]\n사용자의 말에 스스로를 해칠 수 있다는 신호가 있을 수 있다. 숙제나 일처럼 일상 이야기가 분명하면 평소처럼 답한다. "
                      "그렇지 않으면 가볍게 넘기지 말고 걱정을 전하고, 자살예방상담전화 109(24시간)에 이야기할 수 있다고 알려 준다.")
@@ -194,7 +195,7 @@ def turn_events(message, uid, llm, store, show_panel, turn, prompt_label=None):
     # ④ 답 생성
     upcoming = upcoming_reminders(store, uid, now)
     system = system_prompt(character, now, settings["location"], memories, summary,
-                           [r.summary for r in results], clarify=choice.action == "clarify", upcoming=upcoming,
+                           [r.summary for r in results], clarify=choice.action == "clarify" and (choice.ask or True), upcoming=upcoming,
                            facts=reminder_facts(results, choice.dropped), caution=caution)
     if show_panel:
         yield {"type": "context", "memories": [m["text"] for m in memories], "upcoming": upcoming,

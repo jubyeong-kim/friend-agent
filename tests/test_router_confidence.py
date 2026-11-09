@@ -97,7 +97,7 @@ def test_right_date_keeps_answer(message, tools):
     ("11월 20일 오후 3시에 치과 간다고 알려 줘", [reminder("2026-11-20T15:00:00+09:00")]),   # 적힌 날짜
     ("주말에 비 와?", [weather("2026-11-15")]),
     ("수요일 다음 날 비 와?", [weather("2026-11-12")]),
-    ("그날 비 와?", [weather("2026-11-09")]),   # 가리키는 말(그날)은 이 확인으로 잡지 못한다
+    # 가리키는 말(그날)은 이 확인으로 잡지 못한다. 앞 대화 없는 '그날 비 와?'는 되묻는다(test_router_clarify.py)
     ("토요일 공휴일이야?", [{"name": "get_holidays", "args": {"from": "2026-11-11", "to": "2026-11-11"}}]),  # 공휴일은 견주지 않는다
 ])
 def test_not_compared(message, tools):
