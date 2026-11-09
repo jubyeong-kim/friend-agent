@@ -5,6 +5,7 @@
    메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
    '다음 주 금요일' 같은 날짜 말과 다른 날짜를 넣으면 코드가 셈한 날짜로 고친다(모델 확신값은 틀릴 때도 0.9 이상이었다).
    '다음 공휴일'처럼 기간을 말하지 않고 다음 공휴일을 물으면 모델이 좁게 잡은 기간을 비워 앞으로 1년을 보게 한다.
+   앞 대화 없이 '그날 비 와?'처럼 가리키는 날을 알 수 없으면 날짜를 짐작하지 않고 되묻는다.
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 지시문은 Langfuse 프롬프트 router-prompt 의 라벨 버전을 쓰고, 계측이 꺼졌거나 가져오지 못하면 코드의 ROUTER_TEMPLATE 을 쓴다.
 """
@@ -413,6 +414,25 @@ def limit_tools(tools, guards):
     return kept, dropped
 
 
+# '그날 · 그때'처럼 앞에서 말한 날을 가리키는 말('그 날씨', '그 때문에'는 아니다)
+POINTED_DAY = re.compile(r"그\s*날(?!씨)|그\s*때(?!문)")
+# 가리킬 날짜가 메시지 안에 있는지 보는 날짜 말(셈하지 않는 말도 날짜로 친다)
+DAY_WORDS = re.compile(DAY_EXPR.pattern + "|" + NOT_COUNTED.pattern +
+                       r"|(이번|다음)\s*(주|달)|올해|내년|연말|연초|새해|크리스마스|성탄|설날|추석")
+DATED_TOOLS = {"get_weather", "get_air_quality", "get_holidays", "create_reminder"}
+
+
+def pointed_day_unknown(tools, message, history):
+    """앞 대화가 없는데 '그날 · 그때'가 가리킬 날짜가 메시지에도 없고, 날짜가 필요한 도구를 골랐으면 True.
+
+    15번 staging 재측정(11/9)에서 앞 대화 없이 '그날 비 와?'를 보냈더니 모델이 그날을 오늘로 정해 날씨를 조회했다(확신값 0.9).
+    앞 대화가 있으면 모델이 거기서 날짜를 찾으므로 건드리지 않는다.
+    """
+    if history or not POINTED_DAY.search(message) or DAY_WORDS.search(message):
+        return False
+    return any(t["name"] in DATED_TOOLS for t in tools)
+
+
 def choose(message, history, now, location, llm, label=None):
     if getattr(llm, "can_reason", False):
         try:
@@ -438,8 +458,15 @@ def choose(message, history, now, location, llm, label=None):
         result.confidence = CONFIDENCE_THRESHOLD
         result.guards.append("약속을 묻는 말이라 되묻지 않고 약속 목록을 봅니다.")
 
+    # 안전장치: 앞 대화 없이 '그날 비 와?'처럼 가리키는 날을 알 수 없으면 오늘로 짐작하지 않고 되묻는다.
+    # 확신도는 모델 값 그대로 둔다(확신이 높아도 코드가 되물었다는 것이 기록에 남게)
+    if result.action == "answer" and pointed_day_unknown(result.tools, message, history):
+        result.action = "clarify"
+        result.guards.append("'그날 · 그때'가 가리키는 날짜가 메시지에도 앞 대화에도 없어 도구를 쓰지 않고 되묻습니다.")
+        result.tools, result.dropped = [], []
+
     # 안전장치: 확신이 낮으면 도구를 쓰지 않고 되묻는다
-    if result.confidence < CONFIDENCE_THRESHOLD:
+    if result.action == "answer" and result.confidence < CONFIDENCE_THRESHOLD:
         result.action = "clarify"
         result.guards.append(f"확신도 {result.confidence:.2f}가 기준 {CONFIDENCE_THRESHOLD} 미만이라 도구를 쓰지 않고 되묻습니다.")
         result.tools, result.dropped = [], []
