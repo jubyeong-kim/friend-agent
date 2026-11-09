@@ -53,6 +53,34 @@ def same_text(text):
     return str(text).strip().rstrip(".").strip()
 
 
+# 날을 콕 집지 않은 기간 말: (말, 이번 주 월요일부터 며칠 뒤에 시작, 며칠 동안).
+# 지시문에 기간으로 적으라고 해도 모델이 「다음 주에 수술」을 「11월 18일(수) 수술」처럼 하루를 골라 적었다(4/4).
+VAGUE_PERIODS = [
+    (re.compile(r"다음\s*주\s*말"), 12, 2),
+    (re.compile(r"이번\s*주\s*말"), 5, 2),
+    (re.compile(r"다음\s*주(?!\s*(?:말|부터|까지))"), 7, 7),
+]
+EXACT_DAY = re.compile(r"\d{1,2}\s*일|[월화수목금토일]요일|오늘|내일|모레|글피")
+DATE_IN_TEXT = re.compile(r"\d{1,2}월\s*\d{1,2}일(?:\([월화수목금토일]\))?")
+
+
+def period_text(text, message, now):
+    """사용자가 '다음 주' · '이번 주말'처럼 기간만 말했는데 일정 메모에 날짜가 하나만 적혔으면 그 날짜를 기간으로 바꾼다.
+
+    '다음 주 수요일', '내일'처럼 날을 집은 말이 있으면 건드리지 않는다.
+    """
+    if EXACT_DAY.search(message) or "~" in text:
+        return text
+    found = next(((start, days) for pattern, start, days in VAGUE_PERIODS if pattern.search(message)), None)
+    dates = DATE_IN_TEXT.findall(text)
+    if not found or len(dates) != 1:
+        return text
+    first = now.date() - timedelta(days=now.weekday()) + timedelta(days=found[0])
+    last = first + timedelta(days=found[1] - 1)
+    end = f"{last.day}일({when.WEEKDAYS[last.weekday()]})" if last.month == first.month else when.date_label(last)
+    return text.replace(dates[0], f"{when.date_label(first)}~{end}", 1)
+
+
 def object_particle(word):
     """받침이 있으면 '을', 없으면 '를'."""
     last = word[-1]
@@ -135,26 +163,31 @@ def update_memories(store, uid, user_message, reply, now, llm, trace=None):
         plan = rule_extract(user_message, now)
         gen.update(output=plan)
 
+    def clean(text, kind):
+        text = str(text or "").strip()
+        return (period_text(text, user_message, now) if kind == "event" else text)[:200]
+
     known_ids = {m["id"]: m for m in existing}
     known_texts = {same_text(m["text"]) for m in existing}
+    updates = []
+    for item in plan.get("update") or []:
+        old = known_ids.get(item.get("id"))
+        text = clean(item.get("text"), old and old["kind"])
+        if old and text and not is_sensitive(text):
+            updates.append((item["id"], text))
     # 모델이 바뀐 사실을 update 하면서 같은 글을 add 에도 넣어 기억이 두 개 생기곤 했다(「대학원생이다」 4/4).
     # update 로 바뀔 글은 add 하지 않는다.
-    for item in plan.get("update") or []:
-        text = str(item.get("text") or "").strip()[:200]
-        if item.get("id") in known_ids and text and not is_sensitive(text):
-            known_texts.add(same_text(text))
+    known_texts |= {same_text(text) for _, text in updates}
     changes = {"added": [], "updated": [], "removed": []}
     for item in plan.get("add") or []:
-        text = str(item.get("text") or "").strip()[:200]
         kind = item.get("kind") if item.get("kind") in KINDS else "fact"
+        text = clean(item.get("text"), kind)
         if not text or same_text(text) in known_texts or is_sensitive(text):
             continue
         changes["added"].append(store.add_memory(uid, kind, text))
-    for item in plan.get("update") or []:
-        text = str(item.get("text") or "").strip()[:200]
-        if item.get("id") in known_ids and text and not is_sensitive(text):
-            store.update_memory(uid, item["id"], text)
-            changes["updated"].append({"id": item["id"], "text": text})
+    for memory_id, text in updates:
+        store.update_memory(uid, memory_id, text)
+        changes["updated"].append({"id": memory_id, "text": text})
     for memory_id in plan.get("remove") or []:
         if memory_id in known_ids:
             store.delete_memory(uid, memory_id)

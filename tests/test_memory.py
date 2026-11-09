@@ -47,6 +47,34 @@ def test_trailing_period_counts_as_same_memory():
     assert texts(store) == ["고양이 두 마리 키우고 있다."]
 
 
+def saved_event(message, text, now=NOW, kind="event"):
+    store = MemoryStore()
+    plan = {"add": [{"kind": kind, "text": text}], "update": [], "remove": []}
+    memory.update_memories(store, UID, message, "그렇구나", now, PlanLLM(plan))
+    return texts(store)[0]
+
+
+def test_vague_next_week_becomes_the_whole_week():
+    # NOW 는 11월 9일(월). 모델이 「다음 주」를 보고 수요일을 골라 적은 경우(실측 4/4)
+    assert saved_event("나 다음 주에 수술 받아", "11월 18일(수) 수술") == "11월 16일(월)~22일(일) 수술"
+
+
+def test_vague_this_weekend_becomes_saturday_and_sunday():
+    # 12일은 목요일인데 토요일이라고 적은 경우(staging 2/2)
+    assert saved_event("나 이번 주말에 제주도 여행 가", "11월 12일(토) 제주도 여행") == "11월 14일(토)~15일(일) 제주도 여행"
+
+
+def test_vague_period_across_months():
+    wed = datetime(2026, 11, 25, 15, 0, tzinfo=timezone.utc)
+    assert saved_event("다음 주에 이사해", "12월 2일(수) 이사", now=wed) == "11월 30일(월)~12월 6일(일) 이사"
+
+
+def test_exact_day_or_start_point_is_left_alone():
+    assert saved_event("다음 주 수요일에 수술 받아", "11월 18일(수) 수술") == "11월 18일(수) 수술"
+    assert saved_event("다음 주부터 헬스 다녀", "11월 16일(월)부터 헬스") == "11월 16일(월)부터 헬스"
+    assert saved_event("다음 주에 수술 받아", "11월 18일(수) 수술", kind="fact") == "11월 18일(수) 수술"
+
+
 def test_add_is_kept_when_update_points_to_unknown_id():
     # update 가 없는 id 를 가리켜 버려지면, 같은 글의 add 까지 막아서 사실을 잃으면 안 된다
     store, _ = store_with("사용자는 서울에 산다")
