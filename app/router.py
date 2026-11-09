@@ -3,6 +3,7 @@
 1. 모델이 메시지와 최근 대화를 읽고 도구를 고른다(약속 저장은 최대 5개, 다른 도구는 최대 2개). 확신도(0~1)와 이유를 함께 낸다.
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
    메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
+   '다음 주 금요일' 같은 날짜 말과 다른 날짜를 넣으면 코드가 셈한 날짜로 고친다(모델 확신값은 틀릴 때도 0.9 이상이었다).
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 지시문은 Langfuse 프롬프트 router-prompt 의 라벨 버전을 쓰고, 계측이 꺼졌거나 가져오지 못하면 코드의 ROUTER_TEMPLATE 을 쓴다.
 """
@@ -244,6 +245,7 @@ def model_choose(message, history, now, location, llm, label=None):
             if single_reminder:  # 약속이 여럿이면 어느 것이 '밤 12시'인지 모른다
                 fix_midnight(t["args"], message, now, result.guards)
     result.tools, result.dropped = limit_tools(result.tools, result.guards)
+    fix_said_date(result, message, now)
     return result
 
 
@@ -299,6 +301,65 @@ def keep_written_date(args, message, now, guards):
         return  # 어느 줄의 날짜인지 모르거나, 아직 오지 않은 날이거나('30일 회의 하루 전에'), 앞날로 옮긴 게 아니다
     args["due_at"] = due.replace(year=day.year, month=day.month, day=day.day).isoformat()
     guards.append(f"create_reminder 의 날짜를 메시지에 적힌 {day.month}월 {day.day}일로 되돌렸습니다(이미 지난 날짜).")
+
+
+# 날짜 교차 확인: 모델이 낸 확신값은 맞을 때도 틀릴 때도 0.9 ~ 1.0 이라(15번 기준 측정 120턴 중 115턴) 틀린 턴을 가려내지 못한다.
+# 그래서 메시지의 날짜 말을 코드가 따로 셈해 모델이 넣은 날짜와 견주고, 다르면 코드가 셈한 날짜로 고친다.
+DAY_EXPR = re.compile(r"내일\s*모레|그저께|어제|오늘|내일|모레|글피|[월화수목금토일]요일")
+DAY_BEFORE = re.compile(r"전날|하루\s*전")
+# 코드가 셈하지 않는 날짜 말. 이런 말이 있으면 견주지 않는다(틀리게 셈해 맞는 날짜까지 바꾸지 않게)
+NOT_COUNTED = re.compile(r"다음\s*날|이튿날|이틀|사흘|나흘|\d+\s*일\s*(전|뒤|후)|주말|지난\s*주|저번\s*주|다다음|\d{1,2}\s*월|\d{1,2}\s*일(?!요일)")
+DATE_FIELDS = {"get_weather": "date", "get_air_quality": "date", "create_reminder": "due_at"}
+
+
+def said_day(message, now, reminder=False):
+    """메시지의 날짜 말을 코드가 셈한 날짜. 날짜 말이 없거나 둘 이상이거나 코드가 셈하지 않는 말이 있으면 None.
+
+    약속은 '밤 12시'(다음 날 0시)까지 셈하려고 시각을 함께 읽는다. '시험 전날'은 그 요일의 하루 전이다.
+    """
+    if len(DAY_EXPR.findall(message)) != 1 or NOT_COUNTED.search(message):
+        return None
+    if reminder:
+        due = when.parse_when(message, now)
+        day = due.date() if due else None
+    else:
+        offset = when.day_offset(message, now)
+        day = (now + timedelta(days=offset)).date() if offset is not None else None
+    if day and DAY_BEFORE.search(message):
+        day -= timedelta(days=1)
+    return day
+
+
+def fix_said_date(result, message, now):
+    """모델이 넣은 날짜가 메시지의 날짜 말과 다르면 코드가 셈한 날짜로 고친다(약속은 시각을 그대로 두고 날짜만).
+
+    15번 기준 측정에서 '다음 주 금요일'을 11/16(정답 11/20)으로, '이번 주 금요일 시험 전날'을 5번 중 5번 틀리게 넣었는데
+    확신도는 0.9 ~ 1.0 이라 되묻기 안전장치가 켜지지 않았다. 처음에는 다르면 되묻게 했지만, 답을 쓰는 모델이 무엇을 되물을지 몰라
+    저장하지 않고 '알려 줄게'라고 하거나 '알림을 줄 수 없어'라고 답했다(로컬 실측 5턴 중 5턴). 그래서 고친다.
+    고친 날짜는 도구 결과로 답에 그대로 나가므로, 코드가 틀리게 셈했으면 사용자가 볼 수 있다.
+    """
+    kept = []
+    for t in result.tools:
+        key = DATE_FIELDS.get(t["name"])
+        want = said_day(message, now, reminder=t["name"] == "create_reminder") if key and key in t["args"] else None
+        if want is not None:
+            try:
+                got = datetime.fromisoformat(str(t["args"][key]))
+            except ValueError:
+                got = None  # 못 읽는 값은 도구가 거절한다
+            if got is not None:
+                got = (got if got.tzinfo else got.replace(tzinfo=now.tzinfo)).astimezone(now.tzinfo)
+                if got.date() != want:
+                    fixed = (want.isoformat() if key == "date"
+                             else got.replace(year=want.year, month=want.month, day=want.day).isoformat())
+                    t["args"][key] = fixed
+                    result.guards.append(f"{t['name']} 의 {key} 날짜 {got.date().isoformat()} 를 메시지의 날짜 말로 셈한 "
+                                         f"{want.isoformat()} 로 고쳤습니다.")
+        if t in kept:  # 고치고 나니 앞의 도구와 같아졌다(내일 날씨를 내일 · 모레로 두 번 고른 경우)
+            result.guards.append(f"{t['name']} 를 고친 뒤 앞의 것과 같아 하나만 남겼습니다.")
+            continue
+        kept.append(t)
+    result.tools = kept
 
 
 def written_day(text, written):
