@@ -186,19 +186,33 @@ def rule_choose(message, now, location):
 
 # ── 모델 ────────────────────────────────────────────────────────────
 
+def lift_misplaced_confidence(data):
+    """모델이 confidence · reason 을 맨 바깥 대신 tools 목록 안의 이름 없는 칸에 넣을 때가 있다.
+    그대로 읽으면 확신도가 0 이 되어, 맞게 고른 도구를 버리고 되묻는다(staging 기록 45개 중 3개).
+    맨 바깥에 confidence 가 없을 때만 그 칸에서 꺼내 읽는다. (고친 data, 꺼냈는지)를 돌려준다."""
+    if not isinstance(data, dict) or "confidence" in data:
+        return data, False
+    for t in data.get("tools") or []:
+        if isinstance(t, dict) and not t.get("name") and "confidence" in t:
+            return {**data, "confidence": t["confidence"], "reason": data.get("reason") or t.get("reason", "")}, True
+    return data, False
+
+
 def model_choose(message, history, now, location, llm, label=None):
     recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:]) or "(없음)"
     user = (f"[지금] {now.isoformat()} ({when.WEEKDAYS[now.weekday()]}요일)\n[달력]\n{when.calendar_hint(now)}\n"
             f"[사용자 지역] {location}\n[최근 대화]\n{recent}\n\n[메시지]\n{message}")
     prompt = tracing.get_prompt(PROMPT_NAME, label)  # label 은 A/B 의 prod-a · prod-b. 없으면 기본 라벨
     tracing.link_prompt(prompt)
-    data = llm.complete_json(router_prompt(prompt), user)
+    data, lifted = lift_misplaced_confidence(llm.complete_json(router_prompt(prompt), user))
     tools = []
     for t in data.get("tools") or []:
         if isinstance(t, dict) and t.get("name") in TOOLS:
             tools.append({"name": t["name"], "args": t.get("args") if isinstance(t.get("args"), dict) else {}})
     confidence = max(0.0, min(1.0, float(data.get("confidence", 0))))
     result = ToolChoice(tools, confidence, str(data.get("reason", "")), "model")
+    if lifted:
+        result.guards.append("확신도와 이유가 도구 목록 안에 들어 있어 꺼내 읽었습니다.")
 
     # 안전장치: 지난 연도로 적힌 날짜는 올해로 고친다
     for t in result.tools:
