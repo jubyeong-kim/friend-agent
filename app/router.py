@@ -96,6 +96,7 @@ class ToolChoice:
     action: str = "answer"               # answer, clarify
     guards: list = field(default_factory=list)
     dropped: list = field(default_factory=list)  # 한도를 넘어 쓰지 않은 도구. 답이 처리하지 못했다고 말하게 한다
+    ask: str = ""                        # 되물을 때 무엇을 모르는지. 비면 답이 무엇을 물을지 스스로 정한다
 
 
 # ── 키워드 규칙 ─────────────────────────────────────────────────────
@@ -462,6 +463,7 @@ def choose(message, history, now, location, llm, label=None):
     # 확신도는 모델 값 그대로 둔다(확신이 높아도 코드가 되물었다는 것이 기록에 남게)
     if result.action == "answer" and pointed_day_unknown(result.tools, message, history):
         result.action = "clarify"
+        result.ask = f"메시지의 '{POINTED_DAY.search(message).group(0)}' 가 가리키는 날짜(어느 날인지 물어본다)"
         result.guards.append("'그날 · 그때'가 가리키는 날짜가 메시지에도 앞 대화에도 없어 도구를 쓰지 않고 되묻습니다.")
         result.tools, result.dropped = [], []
 

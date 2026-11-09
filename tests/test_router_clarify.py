@@ -46,6 +46,7 @@ def test_unknown_day_asks_back(message, tool):
     assert r.tools == [] and r.dropped == []
     assert r.confidence == 0.9  # 모델 확신값은 그대로 남긴다
     assert any("그날 · 그때" in g for g in r.guards)
+    assert "가리키는 날짜" in r.ask  # 답이 무엇을 되물을지 알게 넘긴다
 
 
 def test_rule_mode_also_asks_back():
@@ -84,3 +85,15 @@ def test_other_words_are_untouched(message, tools):
     r = router.choose(message, [], NOW, "서울", Picks(*tools))
     assert r.action == "answer"
     assert r.tools == tools
+
+
+def test_reply_prompt_says_what_to_ask():
+    # 되묻기 칸이 '확실하지 않다'뿐이면 답이 '날씨 정보는 잘 몰라'처럼 되묻지 않았다(로컬 서버 1턴)
+    from app import agent
+    from app.persona import DEFAULT_CHARACTER
+
+    r = router.choose("그날 비 와?", [], NOW, "서울", Picks(weather()))
+    ask = agent.system_prompt(DEFAULT_CHARACTER, NOW, "서울", [], None, clarify=r.action == "clarify" and (r.ask or True))
+    assert "[되묻기]" in ask and "모르는 것: 메시지의 '그날'" in ask
+    plain = agent.system_prompt(DEFAULT_CHARACTER, NOW, "서울", [], None, clarify=True)  # 확신이 낮아 되묻는 때
+    assert "[되묻기]" in plain and "모르는 것" not in plain
