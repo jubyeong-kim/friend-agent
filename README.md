@@ -34,6 +34,7 @@
 | ⚖️ 빈도 · 영향 · 비용으로 하나씩 고른 과정 | [REPORT 4장](REPORT.md#4-무엇을-먼저-고쳤나) |
 | 🧪 문제 문장 · 정상 문장으로 잰 전후 비교 | [REPORT 5장](REPORT.md#5-고치기와-전후-비교) |
 | 🔁 배포 뒤 새 대화를 version(리비전)별로 다시 잰 결과 | [REPORT 6장](REPORT.md#6-고친-뒤-다시-재기) |
+| 🖼️ 트레이스 캡처로 보는 고치기 전 · 후와 version | [REPORT 6-7](REPORT.md#6-7-트레이스로-보는-전후) · [그림 폴더](docs/report-15) |
 | 🧑‍⚖️ 심사 모델을 얼마나 믿을 수 있나 · 남은 문제 | [REPORT 7장](REPORT.md#7-심사-모델을-얼마나-믿을-수-있나) · [8장](REPORT.md#8-남은-문제) |
 | 🛠️ 고친 코드 | [#54](https://github.com/jubyeong-kim/friend-agent/pull/54) · [#55](https://github.com/jubyeong-kim/friend-agent/pull/55) · [#56](https://github.com/jubyeong-kim/friend-agent/pull/56) · [#58](https://github.com/jubyeong-kim/friend-agent/pull/58) · [#59](https://github.com/jubyeong-kim/friend-agent/pull/59) |
 
