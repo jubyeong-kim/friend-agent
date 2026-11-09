@@ -4,6 +4,7 @@
 2. 안전장치: 확신도가 기준보다 낮으면 도구를 쓰지 않고 되묻는다(코드 규칙).
    메시지에 적힌 지난 날짜를 모델이 오늘이나 앞날로 옮기면 적힌 날짜로 되돌리고, 한도를 넘어 뺀 도구는 따로 돌려준다.
    '다음 주 금요일' 같은 날짜 말과 다른 날짜를 넣으면 코드가 셈한 날짜로 고친다(모델 확신값은 틀릴 때도 0.9 이상이었다).
+   '다음 공휴일'처럼 기간을 말하지 않고 다음 공휴일을 물으면 모델이 좁게 잡은 기간을 비워 앞으로 1년을 보게 한다.
 fake 모드처럼 모델을 쓰지 않을 때나 모델 응답을 읽지 못했을 때는 키워드 규칙이 같은 형식으로 답한다.
 지시문은 Langfuse 프롬프트 router-prompt 의 라벨 버전을 쓰고, 계측이 꺼졌거나 가져오지 못하면 코드의 ROUTER_TEMPLATE 을 쓴다.
 """
@@ -222,6 +223,7 @@ def model_choose(message, history, now, location, llm, label=None):
                 t["args"][key], fixed = when.fix_year(t["args"][key], now)
                 if fixed:
                     result.guards.append(f"{t['name']} 의 {key} 연도가 지난 연도라 {now.year}년으로 고쳤습니다.")
+    widen_next_holiday(result.tools, message, result.guards)
 
     # 안전장치: 같은 도구를 같은 인자로 두 번 고르면 하나만 남긴다. 이동 시간은 인자가 달라도 하나로 합친다
     # (실습에서 출발 시각용, 도착 시각용으로 나눠 두 번 골라 카드가 두 장 나왔다)
@@ -260,6 +262,31 @@ def fix_route_clock(args, message, now, guards):
         if got is None or (abs((got - now).total_seconds()) < 300 and got != datetime.fromisoformat(said)):
             args[key] = said
             guards.append(f"get_route 의 {key} 를 메시지에 나온 시각 {said[11:16]}(으)로 고쳤습니다.")
+
+
+# '다음 공휴일', '제일 가까운 빨간 날'처럼 기간을 말하지 않고 다음에 오는 것을 묻는 말
+NEXT_HOLIDAY = re.compile(r"(다음|가장\s*가까운|제일\s*가까운|다가오는|돌아오는)\s*(공휴일|휴일|빨간\s*날|쉬는\s*날|연휴)")
+# 기준이 되는 때나 기간을 말했으면 모델이 정한 기간을 그대로 둔다('크리스마스 다음 공휴일', '12월에 다음 연휴', '그 다음 공휴일')
+HOLIDAY_PERIOD = re.compile(r"\d{1,2}\s*월|\d{1,2}\s*일(?!요일)|(이번|다음|다다음|지난|저번)\s*(주|달)|올해|내년|작년|연말|연초"
+                            r"|크리스마스|성탄|설날|추석|그\s*다음|이후|지나고|부터")
+
+
+def widen_next_holiday(tools, message, guards):
+    """'다음 공휴일 언제야?'처럼 기간을 말하지 않고 다음 공휴일을 물으면 get_holidays 기간을 비워 앞으로 1년을 보게 한다.
+
+    15번 staging 측정(11/9)에서 모델이 '다음 공휴일'을 11/9 ~ 11/22 처럼 2 ~ 3주만 조회했다(확신값 0.9). 다음 공휴일 12/25 가
+    기간 밖이었고, 같은 문장을 5번 보내면 기간을 둘로 쪼개 고르기도 해 도구 선택이 흔들렸다.
+    비운 기간은 공휴일 도구가 오늘부터 1년으로 읽는다. 둘로 쪼개 고른 것은 같은 인자가 되어 뒤에서 하나로 합쳐진다.
+    """
+    if not NEXT_HOLIDAY.search(message) or HOLIDAY_PERIOD.search(message):
+        return
+    picked = [t for t in tools if t["name"] == "get_holidays" and t["args"]]
+    if not picked:
+        return
+    ranges = ", ".join(f"{t['args'].get('from', '')} ~ {t['args'].get('to', '')}" for t in picked)
+    for t in picked:
+        t["args"] = {}
+    guards.append(f"기간을 말하지 않고 다음 공휴일을 묻는 말이라 get_holidays 기간({ranges})을 비워 앞으로 1년을 봅니다.")
 
 
 MIDNIGHT = re.compile(r"자정|밤\s*12\s*시")
