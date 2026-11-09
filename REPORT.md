@@ -298,7 +298,7 @@ Langfuse 프로젝트는 비공개라서, 같은 질문을 고치기 전과 고�
 
 | 고치기 전 · `00054-87f` | 고친 뒤 · `00088-hav` |
 | :---: | :---: |
-| <img src="docs/report-15/1-date-before.png" width="420"> | <img src="docs/report-15/1-date-after.png" width="420"> |
+| <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/1-date-before.png" width="420"> | <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/1-date-after.png" width="420"> |
 | 약속이 **11월 16일(월)** 로 저장됐습니다 | 약속이 **11월 20일(금)** 로 저장됐습니다 |
 
 고친 뒤에도 모델은 11월 17일을 골랐습니다. 하지만 코드가 「다음 주 금요일」을 직접 셈해 11월 20일로 고쳤고, 고쳤다는 사실을 서버의 판단 기록(guards)에 남겼습니다. 트리에 새로 생긴 `risk-check` 는 #58 의 위험 판정 단계입니다.
@@ -309,7 +309,7 @@ Langfuse 프로젝트는 비공개라서, 같은 질문을 고치기 전과 고�
 
 | 고치기 전 · `00082-quw` | 고친 뒤 · `00090-jiw` |
 | :---: | :---: |
-| <img src="docs/report-15/2-holiday-before.png" width="420"> | <img src="docs/report-15/2-holiday-after.png" width="420"> |
+| <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/2-holiday-before.png" width="420"> | <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/2-holiday-after.png" width="420"> |
 | 「공휴일이 없습니다」에서 끝남 | 그 뒤 첫 공휴일 **12월 25일(금)** 과 **사흘 연휴**까지 알려 줌 |
 
 조회 기간은 그대로 좁지만, 도구 결과가 기간 밖의 다음 공휴일까지 알려 주기 때문에 답이 연휴를 말할 수 있게 됐습니다.
@@ -320,7 +320,7 @@ Langfuse 프로젝트는 비공개라서, 같은 질문을 고치기 전과 고�
 
 | 고치기 전 · `00054-87f` | 고친 뒤 · `00088-hav` |
 | :---: | :---: |
-| <img src="docs/report-15/3-crisis-before.png" width="420"> | <img src="docs/report-15/3-crisis-after.png" width="420"> |
+| <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/3-crisis-before.png" width="420"> | <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/3-crisis-after.png" width="420"> |
 | 모델이 올라가는 방법을 답함(가림) | `risk-check` 가 위험으로 판정 → 답 만들기(`reply`) 없이 정해진 안전 답 |
 
 #### ④ 어느 배포가 답했는지 — version
@@ -329,7 +329,7 @@ Langfuse 프로젝트는 비공개라서, 같은 질문을 고치기 전과 고�
 
 | 고치기 전 | 고친 뒤 |
 | :---: | :---: |
-| <img src="docs/report-15/4-version-before.png" width="420"> | <img src="docs/report-15/4-version-after.png" width="420"> |
+| <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/4-version-before.png" width="420"> | <img src="https://raw.githubusercontent.com/jubyeong-kim/friend-agent/staging/docs/report-15/4-version-after.png" width="420"> |
 | `friend-agent-staging-00054-87f` · 커밋 `0f871be` | `friend-agent-staging-00088-hav` · 커밋 `2097ff0`(#58 머지) |
 
 ---
