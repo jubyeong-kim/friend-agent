@@ -46,6 +46,11 @@ DAY_WORD = re.compile(r"(다음\s*주\s*)?(오늘|내일\s*모레|내일|모레|
 CLOCK = re.compile(r"\d{1,2}\s*시\s*(?:반|\d{1,2}\s*분)?에?\s*")
 
 
+def same_text(text):
+    """끝의 마침표 · 공백만 다른 글은 같은 기억으로 본다."""
+    return str(text).strip().rstrip(".").strip()
+
+
 def object_particle(word):
     """받침이 있으면 '을', 없으면 '를'."""
     last = word[-1]
@@ -129,12 +134,18 @@ def update_memories(store, uid, user_message, reply, now, llm, trace=None):
         gen.update(output=plan)
 
     known_ids = {m["id"]: m for m in existing}
-    known_texts = {m["text"] for m in existing}
+    known_texts = {same_text(m["text"]) for m in existing}
+    # 모델이 바뀐 사실을 update 하면서 같은 글을 add 에도 넣어 기억이 두 개 생기곤 했다(「대학원생이다」 4/4).
+    # update 로 바뀔 글은 add 하지 않는다.
+    for item in plan.get("update") or []:
+        text = str(item.get("text") or "").strip()[:200]
+        if item.get("id") in known_ids and text and not is_sensitive(text):
+            known_texts.add(same_text(text))
     changes = {"added": [], "updated": [], "removed": []}
     for item in plan.get("add") or []:
         text = str(item.get("text") or "").strip()[:200]
         kind = item.get("kind") if item.get("kind") in KINDS else "fact"
-        if not text or text in known_texts or is_sensitive(text):
+        if not text or same_text(text) in known_texts or is_sensitive(text):
             continue
         changes["added"].append(store.add_memory(uid, kind, text))
     for item in plan.get("update") or []:
