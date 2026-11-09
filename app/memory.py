@@ -20,6 +20,8 @@ KINDS = ("fact", "preference", "event")
 EXTRACT_PROMPT = """너는 AI 친구 서비스의 기억 정리 담당이다. 방금 오간 대화에서 다음 대화에도 쓸 만한 사용자에 대한 사실을 정리한다.
 - kind 는 fact(사실: 이름, 직업, 가족, 반려동물), preference(취향), event(날짜가 있는 일정이나 사건) 중 하나다.
 - event 에는 대화에 나온 날짜를 [지금] 기준의 실제 날짜로 바꿔 함께 적는다. [달력]을 보고 요일을 맞춘다. 예: "10월 16일(금) 자격증 시험".
+- 사용자가 날을 콕 집어 말하지 않았으면(다음 주, 이번 주말, 다음 달 등) 하루를 골라 지어내지 않는다. [달력]에서 그 말에 해당하는 기간을 찾아 기간 그대로 적는다.
+  예: 오늘이 3월 2일(월)일 때 "이번 주말에 캠핑 가" → "3월 7일(토)~8일(일) 캠핑", "다음 주에 이사해" → "3월 9일(월)~15일(일) 중 이사", "다음 달부터 요가 다녀" → "4월부터 요가 다님".
 - event 에 시각이 나왔으면 날짜 뒤에 24시간 형식(HH:MM)으로 꼭 함께 적는다. "공부 끝나면"처럼 조건도 있으면 남긴다. 예: "10월 21일(수) 18:00 공부 끝나고 인왕산 가기".
 - 이미 있는 기억과 같은 내용이면 추가하지 않는다.
 - 사는 곳, 직업, 학교처럼 이미 있는 기억이 바뀌었으면(이사, 이직, 졸업 등) add 하지 말고 [이미 있는 기억]의 그 id 로 update 해서 지금 사실 하나로 바꾼다. 같은 내용을 add 와 update 에 함께 넣지 않는다.
@@ -49,6 +51,34 @@ CLOCK = re.compile(r"\d{1,2}\s*시\s*(?:반|\d{1,2}\s*분)?에?\s*")
 def same_text(text):
     """끝의 마침표 · 공백만 다른 글은 같은 기억으로 본다."""
     return str(text).strip().rstrip(".").strip()
+
+
+# 날을 콕 집지 않은 기간 말: (말, 이번 주 월요일부터 며칠 뒤에 시작, 며칠 동안).
+# 지시문에 기간으로 적으라고 해도 모델이 「다음 주에 수술」을 「11월 18일(수) 수술」처럼 하루를 골라 적었다(4/4).
+VAGUE_PERIODS = [
+    (re.compile(r"다음\s*주\s*말"), 12, 2),
+    (re.compile(r"이번\s*주\s*말"), 5, 2),
+    (re.compile(r"다음\s*주(?!\s*(?:말|부터|까지))"), 7, 7),
+]
+EXACT_DAY = re.compile(r"\d{1,2}\s*일|[월화수목금토일]요일|오늘|내일|모레|글피")
+DATE_IN_TEXT = re.compile(r"\d{1,2}월\s*\d{1,2}일(?:\([월화수목금토일]\))?")
+
+
+def period_text(text, message, now):
+    """사용자가 '다음 주' · '이번 주말'처럼 기간만 말했는데 일정 메모에 날짜가 하나만 적혔으면 그 날짜를 기간으로 바꾼다.
+
+    '다음 주 수요일', '내일'처럼 날을 집은 말이 있으면 건드리지 않는다.
+    """
+    if EXACT_DAY.search(message) or "~" in text:
+        return text
+    found = next(((start, days) for pattern, start, days in VAGUE_PERIODS if pattern.search(message)), None)
+    dates = DATE_IN_TEXT.findall(text)
+    if not found or len(dates) != 1:
+        return text
+    first = now.date() - timedelta(days=now.weekday()) + timedelta(days=found[0])
+    last = first + timedelta(days=found[1] - 1)
+    end = f"{last.day}일({when.WEEKDAYS[last.weekday()]})" if last.month == first.month else when.date_label(last)
+    return text.replace(dates[0], f"{when.date_label(first)}~{end}", 1)
 
 
 def object_particle(word):
@@ -133,26 +163,31 @@ def update_memories(store, uid, user_message, reply, now, llm, trace=None):
         plan = rule_extract(user_message, now)
         gen.update(output=plan)
 
+    def clean(text, kind):
+        text = str(text or "").strip()
+        return (period_text(text, user_message, now) if kind == "event" else text)[:200]
+
     known_ids = {m["id"]: m for m in existing}
     known_texts = {same_text(m["text"]) for m in existing}
+    updates = []
+    for item in plan.get("update") or []:
+        old = known_ids.get(item.get("id"))
+        text = clean(item.get("text"), old and old["kind"])
+        if old and text and not is_sensitive(text):
+            updates.append((item["id"], text))
     # 모델이 바뀐 사실을 update 하면서 같은 글을 add 에도 넣어 기억이 두 개 생기곤 했다(「대학원생이다」 4/4).
     # update 로 바뀔 글은 add 하지 않는다.
-    for item in plan.get("update") or []:
-        text = str(item.get("text") or "").strip()[:200]
-        if item.get("id") in known_ids and text and not is_sensitive(text):
-            known_texts.add(same_text(text))
+    known_texts |= {same_text(text) for _, text in updates}
     changes = {"added": [], "updated": [], "removed": []}
     for item in plan.get("add") or []:
-        text = str(item.get("text") or "").strip()[:200]
         kind = item.get("kind") if item.get("kind") in KINDS else "fact"
+        text = clean(item.get("text"), kind)
         if not text or same_text(text) in known_texts or is_sensitive(text):
             continue
         changes["added"].append(store.add_memory(uid, kind, text))
-    for item in plan.get("update") or []:
-        text = str(item.get("text") or "").strip()[:200]
-        if item.get("id") in known_ids and text and not is_sensitive(text):
-            store.update_memory(uid, item["id"], text)
-            changes["updated"].append({"id": item["id"], "text": text})
+    for memory_id, text in updates:
+        store.update_memory(uid, memory_id, text)
+        changes["updated"].append({"id": memory_id, "text": text})
     for memory_id in plan.get("remove") or []:
         if memory_id in known_ids:
             store.delete_memory(uid, memory_id)
