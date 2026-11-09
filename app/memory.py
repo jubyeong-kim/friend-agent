@@ -21,8 +21,12 @@ EXTRACT_PROMPT = """너는 AI 친구 서비스의 기억 정리 담당이다. �
 - kind 는 fact(사실: 이름, 직업, 가족, 반려동물), preference(취향), event(날짜가 있는 일정이나 사건) 중 하나다.
 - event 에는 대화에 나온 날짜를 [지금] 기준의 실제 날짜로 바꿔 함께 적는다. [달력]을 보고 요일을 맞춘다. 예: "10월 16일(금) 자격증 시험".
 - event 에 시각이 나왔으면 날짜 뒤에 24시간 형식(HH:MM)으로 꼭 함께 적는다. "공부 끝나면"처럼 조건도 있으면 남긴다. 예: "10월 21일(수) 18:00 공부 끝나고 인왕산 가기".
-- 이미 있는 기억과 같은 내용이면 추가하지 않는다. 내용이 바뀌었으면 update 로 고친다. 사용자가 틀렸다거나 잊으라고 하면 remove 한다.
+- 이미 있는 기억과 같은 내용이면 추가하지 않는다.
+- 사는 곳, 직업, 학교처럼 이미 있는 기억이 바뀌었으면(이사, 이직, 졸업 등) add 하지 말고 [이미 있는 기억]의 그 id 로 update 해서 지금 사실 하나로 바꾼다. 같은 내용을 add 와 update 에 함께 넣지 않는다.
+  예: 기억 "id=7 (fact) 사용자는 부산에 산다"가 있을 때 "나 광주로 이사했어" → {"add": [], "update": [{"id": 7, "text": "사용자는 광주에 산다"}], "remove": []}
+- 사용자가 틀렸다거나 잊으라고 하면 remove 한다.
 - 인사, 감탄, 그날의 기분처럼 다음 대화에 쓸모없는 것은 저장하지 않는다.
+- 다만 "요즘 ~에 빠졌어", "~에 꽂혔어"처럼 요즘 즐기는 음식, 취미, 콘텐츠는 그날의 기분이 아니라 취향이므로 preference 로 저장한다. 예: "요즘 마라탕에 꽂혔어" → {"kind": "preference", "text": "요즘 마라탕을 즐겨 먹는다"}
 - 사용자가 나중에 알려 달라고 한 일은 약속 기능이 따로 저장하므로 기억에 넣지 않는다.
 - 주민등록번호, 카드 번호, 계좌 번호, 비밀번호, 정확한 집 주소는 절대 저장하지 않는다.
 - 저장할 것이 없으면 모두 빈 배열로 둔다.
@@ -40,6 +44,11 @@ RULES = [
 ]
 DAY_WORD = re.compile(r"(다음\s*주\s*)?(오늘|내일\s*모레|내일|모레|글피|[월화수목금토일]요일)[에는]*\s*")
 CLOCK = re.compile(r"\d{1,2}\s*시\s*(?:반|\d{1,2}\s*분)?에?\s*")
+
+
+def same_text(text):
+    """끝의 마침표 · 공백만 다른 글은 같은 기억으로 본다."""
+    return str(text).strip().rstrip(".").strip()
 
 
 def object_particle(word):
@@ -125,12 +134,18 @@ def update_memories(store, uid, user_message, reply, now, llm, trace=None):
         gen.update(output=plan)
 
     known_ids = {m["id"]: m for m in existing}
-    known_texts = {m["text"] for m in existing}
+    known_texts = {same_text(m["text"]) for m in existing}
+    # 모델이 바뀐 사실을 update 하면서 같은 글을 add 에도 넣어 기억이 두 개 생기곤 했다(「대학원생이다」 4/4).
+    # update 로 바뀔 글은 add 하지 않는다.
+    for item in plan.get("update") or []:
+        text = str(item.get("text") or "").strip()[:200]
+        if item.get("id") in known_ids and text and not is_sensitive(text):
+            known_texts.add(same_text(text))
     changes = {"added": [], "updated": [], "removed": []}
     for item in plan.get("add") or []:
         text = str(item.get("text") or "").strip()[:200]
         kind = item.get("kind") if item.get("kind") in KINDS else "fact"
-        if not text or text in known_texts or is_sensitive(text):
+        if not text or same_text(text) in known_texts or is_sensitive(text):
             continue
         changes["added"].append(store.add_memory(uid, kind, text))
     for item in plan.get("update") or []:
