@@ -15,10 +15,10 @@
 ![Langfuse](https://img.shields.io/badge/Langfuse-트레이스-0A0A0A?style=for-the-badge)
 ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI_·_배포-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
 
-![tests](https://img.shields.io/badge/테스트-205_통과-2ea44f?style=flat-square)
-![score](https://img.shields.io/badge/15번_개선_총합-82.4_→_87.8-2ea44f?style=flat-square)
-![safety](https://img.shields.io/badge/안전-77.1_→_91.7-2ea44f?style=flat-square)
-![tool](https://img.shields.io/badge/도구_결과_쓰기-63.3_→_88.3-2ea44f?style=flat-square)
+![tests](https://img.shields.io/badge/테스트-252_통과-2ea44f?style=flat-square)
+![score](https://img.shields.io/badge/15번_개선_총합-83.5_→_93.4-2ea44f?style=flat-square)
+![safety](https://img.shields.io/badge/안전-77.1_→_100-2ea44f?style=flat-square)
+![tool](https://img.shields.io/badge/도구_선택-76.9_→_100-2ea44f?style=flat-square)
 
 </div>
 
@@ -35,8 +35,9 @@
 | 🧪 문제 문장 · 정상 문장으로 잰 전후 비교 | [REPORT 5장](REPORT.md#5-고치기와-전후-비교) |
 | 🔁 배포 뒤 새 대화를 version(리비전)별로 다시 잰 결과 | [REPORT 6장](REPORT.md#6-고친-뒤-다시-재기) |
 | 🖼️ 트레이스 캡처로 보는 고치기 전 · 후와 version | [REPORT 6-7](REPORT.md#6-7-트레이스로-보는-전후) · [그림 폴더](docs/report-15) |
-| 🧑‍⚖️ 심사 모델을 얼마나 믿을 수 있나 · 남은 문제 | [REPORT 7장](REPORT.md#7-심사-모델을-얼마나-믿을-수-있나) · [8장](REPORT.md#8-남은-문제) |
-| 🛠️ 고친 코드 | [#54](https://github.com/jubyeong-kim/friend-agent/pull/54) · [#55](https://github.com/jubyeong-kim/friend-agent/pull/55) · [#56](https://github.com/jubyeong-kim/friend-agent/pull/56) · [#58](https://github.com/jubyeong-kim/friend-agent/pull/58) · [#59](https://github.com/jubyeong-kim/friend-agent/pull/59) |
+| 🔂 2차 개선: 셈법 바로잡기 · 남은 낮은 점수 고치기 · 다시 잰 결과 | [REPORT 7장](REPORT.md#7-2차-개선) |
+| 🧑‍⚖️ 심사 모델을 얼마나 믿을 수 있나 · 남은 문제 | [REPORT 8장](REPORT.md#8-심사-모델을-얼마나-믿을-수-있나) · [9장](REPORT.md#9-남은-문제) |
+| 🛠️ 고친 코드 | 1차 [#54](https://github.com/jubyeong-kim/friend-agent/pull/54) · [#55](https://github.com/jubyeong-kim/friend-agent/pull/55) · [#56](https://github.com/jubyeong-kim/friend-agent/pull/56) · [#58](https://github.com/jubyeong-kim/friend-agent/pull/58) · [#59](https://github.com/jubyeong-kim/friend-agent/pull/59) <br/> 2차 [#63](https://github.com/jubyeong-kim/friend-agent/pull/63) · [#64](https://github.com/jubyeong-kim/friend-agent/pull/64) · [#65](https://github.com/jubyeong-kim/friend-agent/pull/65) · [#66](https://github.com/jubyeong-kim/friend-agent/pull/66) · [#67](https://github.com/jubyeong-kim/friend-agent/pull/67) |
 
 ---
 
@@ -84,7 +85,7 @@ flowchart TD
     class R,FIX new
 ```
 
-<sub>🟨 노란 칸은 15번 실습에서 더한 단계입니다(PR #54 · #56 · #58). 모델은 한 턴에 네 번 부릅니다: 위험 판정 · 도구 선택 · 답 · 기억 정리.</sub>
+<sub>🟨 노란 칸은 15번 실습에서 더한 단계입니다(PR #54 · #56 · #58, 「그날」 되묻기는 #64). 모델은 한 턴에 네 번 부릅니다: 위험 판정 · 도구 선택 · 답 · 기억 정리.</sub>
 
 ---
 
@@ -94,21 +95,23 @@ flowchart TD
 flowchart LR
     A["📥 로그 만들기<br/>시험 대화 124턴"] --> B["📊 점수 매기기<br/>7개 분야 · 26개 항목"]
     B --> C["🔎 문제 고르기<br/>빈도 · 영향 · 비용"]
-    C --> D["🛠️ 고치기<br/>PR #54 ~ #59"]
+    C --> D["🛠️ 고치기<br/>1차 #54 ~ #59 · 2차 #63 ~ #67"]
     D --> E["🔁 배포 뒤 다시 재기<br/>version별 비교"]
     E -. 다음 문제 .-> B
 ```
 
-| 분야 | 고치기 전 | 고친 뒤 | 변화 |
-| --- | :---: | :---: | :---: |
-| 🛡️ 안전 | 77.1 | **91.7** | 🟢 +14.6 |
-| 🧭 도구 선택 | 69.2 | **72.2** | 🟢 +3.0 |
-| 🧰 도구 결과 쓰기 | 63.3 | **88.3** | 🟢 +25.0 |
-| 🎭 답 · 캐릭터 | 91.7 | 91.7 | ⚪ 0 |
-| 🧠 기억 | 100 | 88.3 | 🔴 −11.7 |
-| 👋 첫 인사 | 100 | 100 | ⚪ 0 |
-| ⚙️ 운영 | 75.8 | **82.7** | 🟢 +6.9 |
-| **총합** | **82.4** | **87.8** | **🟢 +5.4** |
+| 분야 | 처음 | 1차 뒤 | 2차 뒤 | 변화 |
+| --- | :---: | :---: | :---: | :---: |
+| 🛡️ 안전 | 77.1 | 91.7 | **100** | 🟢 +22.9 |
+| 🧭 도구 선택 | 76.9 | 87.4 | **100** | 🟢 +23.1 |
+| 🧰 도구 결과 쓰기 | 63.3 | **88.3** | 78.3 | 🟢 +15.0 |
+| 🎭 답 · 캐릭터 | 91.7 | 91.7 | 83.3 | 🔴 −8.4 |
+| 🧠 기억 | 100 | 88.3 | **100** | ⚪ 0 |
+| 👋 첫 인사 | 100 | 100 | 100 | ⚪ 0 |
+| ⚙️ 운영 | 75.8 | 82.7 | **92.1** | 🟢 +16.3 |
+| **총합** | **83.5** | **90.0** | **93.4** | **🟢 +9.9** |
+
+<sub>확신값 과신 항목의 바뀐 셈법과 사람 판정을 반영한 값입니다(REPORT 7-1 · 8장). 변화는 처음 → 2차 뒤.</sub>
 
 | 고친 문제 | PR | 결과 |
 | --- | :---: | --- |
@@ -116,9 +119,12 @@ flowchart LR
 | 연휴를 놓친 답 | #55 · #59 | 3번 중 0번 → 3번 중 2번 통과 |
 | 말로 한 날짜를 틀리게 넣고도 확신함 | #56 | 틀린 날짜로 도구 실행 11번 → 0번 |
 | 낱말 없이 이어지는 위기 질문에 답함 | #58 | 6번 중 4번 → 6번 모두 막음 |
+| 「다음 공휴일」을 2주만 조회 · 「그날」에 되묻지 않음 | #64 | 새 문장 각 0/8 → 8/8 |
+| 「자살골」 · 「극단적 다이어트」를 위기로 막음 | #65 | 일상 8문장 중 막힘 3 → 0 · 위기 문장은 그대로 막음 |
+| 기억이 빠지거나 옛 사실이 남음 · 말하지 않은 날짜를 지어냄 | #63 · #66 | 7번 중 5번 → 7번 모두 통과 · 「다음 주 수술」은 기간으로 저장 |
 
 > [!NOTE]
-> 대신 **턴당 비용이 13% 올랐고**(위험 판정 호출), 일상 문장 2개를 위기로 잘못 막았습니다. 기억 점수가 내려간 원인은 아직 확인하지 못했습니다. 자세한 내용은 [REPORT 6장 · 8장](REPORT.md#6-고친-뒤-다시-재기)에 있습니다.
+> 대신 **턴당 비용이 처음보다 32% 올랐고**(위험 판정 호출 · 길어진 지시문), 2차 뒤 「오늘은 여기까지 할게 잘 자」에 위기 안전 답이 나가는 오판이 새로 생겼습니다. 자세한 내용은 [REPORT 7장](REPORT.md#7-2차-개선) · [9장](REPORT.md#9-남은-문제)에 있습니다.
 
 ---
 
@@ -143,7 +149,7 @@ flowchart LR
 | --- | --- |
 | `app/` | 서버 코드. 한 턴 흐름은 `agent.py`, 도구 선택은 `router.py`, 도구는 `tools.py`, 안전은 `safety.py` |
 | `static/index.html` | 화면: 대화 · 캐릭터 설정 · 기억과 약속 · 개발용 「이번 턴」 패널 |
-| `tests/` | 가짜 응답으로 돌리는 테스트 205개(비용 없음) |
+| `tests/` | 가짜 응답으로 돌리는 테스트 252개(비용 없음) |
 | `data/eval/` · `scripts/` | 평가 데이터와 평가 · 운영 스크립트 |
 | `docs/` | 운영 절차 · 배포 권한 · Supabase 연결 · 카나리 기준 |
 | `REPORT.md` | 15번 실습 보고서 |
